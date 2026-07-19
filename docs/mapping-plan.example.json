@@ -1,0 +1,28 @@
+{
+  "id": "4f4e5ecf-4b35-4fd4-817b-ec37779cf9b4",
+  "object_type": "service",
+  "identity_fields": ["service_id"],
+  "fields": [
+    {
+      "source": "service_id",
+      "target": "id",
+      "transforms": [{ "kind": "cast", "target": "string" }],
+      "on_error": "abort_job"
+    },
+    {
+      "source": "service_name",
+      "target": "name",
+      "transforms": [{ "kind": "trim" }, { "kind": "lowercase" }],
+      "on_error": "reject_row"
+    }
+  ],
+  "links": [
+    {
+      "link_type": "owned_by",
+      "target_object_type": "team",
+      "source_fields": ["owner_team_id"],
+      "target_identity_fields": ["id"]
+    }
+  ]
+}
+

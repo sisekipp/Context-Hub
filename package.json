@@ -1,0 +1,13 @@
+{
+  "name": "context-hub",
+  "private": true,
+  "packageManager": "pnpm@11.11.0",
+  "scripts": {
+    "dev": "pnpm --filter @context-hub/web dev",
+    "build": "pnpm --filter @context-hub/web build",
+    "check": "pnpm --filter @context-hub/web check",
+    "test": "pnpm --filter @context-hub/web test",
+    "proto:lint": "buf lint",
+    "proto:generate": "buf generate"
+  }
+}

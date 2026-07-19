@@ -1,0 +1,35 @@
+[tools]
+node = "22.22.3"
+pnpm = "11.11.0"
+rust = "1.89.0"
+buf = "1.57.2"
+
+[tasks.dev]
+run = "docker compose up --build"
+
+[tasks."dev:web"]
+run = "pnpm --config.confirmModulesPurge=false --filter @context-hub/web dev"
+
+[tasks."dev:api"]
+run = "cargo run -p context-hub-api"
+
+[tasks."dev:mcp"]
+run = "cargo run -p context-hub-mcp"
+
+[tasks.check]
+depends = ["check:rust", "check:web", "check:proto"]
+
+[tasks."check:rust"]
+run = "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+
+[tasks."check:web"]
+run = "pnpm --config.confirmModulesPurge=false check && pnpm --config.confirmModulesPurge=false test"
+
+[tasks."check:proto"]
+run = "buf lint && buf build"
+
+[tasks."db:up"]
+run = "docker compose up -d clickhouse minio"
+
+[tasks."db:down"]
+run = "docker compose down"

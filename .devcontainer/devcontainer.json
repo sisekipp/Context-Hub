@@ -1,0 +1,21 @@
+{
+  "name": "ContextHub",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "workspace",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "vscode",
+  "shutdownAction": "stopCompose",
+  "forwardPorts": [3000, 50051, 8080, 8123, 9001, 9002],
+  "postCreateCommand": "mise trust && mise install && rustup component add rustfmt clippy && corepack enable && CI=true pnpm install && cargo fetch && buf generate",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "bufbuild.vscode-buf",
+        "bradlc.vscode-tailwindcss",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}

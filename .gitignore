@@ -1,0 +1,62 @@
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Editors and local workspace state
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Node.js / pnpm
+node_modules/
+.pnpm-store/
+.pnp
+.pnp.*
+*.tsbuildinfo
+
+# Next.js and frontend build output
+.next/
+out/
+dist/
+build/
+.turbo/
+.cache/
+coverage/
+playwright-report/
+test-results/
+next-env.d.ts
+
+# Rust
+target/
+
+# Generated Protobuf clients
+apps/web/src/gen/
+
+# Generated local sample data; keep the generator in scripts/
+samples/*.json
+
+# Local mise overrides
+.mise.toml
+.mise.local.toml
+
+# Local databases, object-store data, and temporary files
+*.db
+*.db-shm
+*.db-wal
+tmp/
+temp/
