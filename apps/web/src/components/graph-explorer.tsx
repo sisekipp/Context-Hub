@@ -1,9 +1,10 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { ForceGraphMethods as ForceGraph2DMethods, NodeObject as NodeObject2D } from "react-force-graph-2d";
-import type { ForceGraphMethods as ForceGraph3DMethods } from "react-force-graph-3d";
+import type { ForceGraphMethods as ForceGraph3DMethods, NodeObject as NodeObject3D } from "react-force-graph-3d";
+import { CanvasTexture, LinearFilter, Sprite, SpriteMaterial, SRGBColorSpace } from "three";
 import {
   ArrowLeft, ArrowRight, Box, DatabaseZap, Filter, Focus, GitBranch, Layers3,
   Maximize2, Minus, Network, Plus, RotateCcw, Search, Tags, X,
@@ -24,6 +25,39 @@ function endpointId(value: unknown) {
   return typeof value === "object" && value !== null && "id" in value ? String((value as { id: unknown }).id) : String(value);
 }
 
+function create3dLabel(node: VisualNode) {
+  const label = node.name.length > 28 ? `${node.name.slice(0, 27)}…` : node.name;
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) return new Sprite();
+
+  context.font = "600 32px Inter, sans-serif";
+  canvas.width = Math.ceil(context.measureText(label).width) + 28;
+  canvas.height = 52;
+
+  const drawingContext = canvas.getContext("2d");
+  if (!drawingContext) return new Sprite();
+  drawingContext.fillStyle = "rgba(7, 11, 18, .86)";
+  drawingContext.fillRect(0, 0, canvas.width, canvas.height);
+  drawingContext.fillStyle = node.color;
+  drawingContext.fillRect(0, 0, 5, canvas.height);
+  drawingContext.font = "600 32px Inter, sans-serif";
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillStyle = "rgba(235, 240, 250, .96)";
+  drawingContext.fillText(label, canvas.width / 2 + 2, canvas.height / 2 + 1);
+
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  texture.minFilter = LinearFilter;
+  const sprite = new Sprite(new SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false }));
+  const height = 5.5;
+  sprite.scale.set(height * canvas.width / canvas.height, height, 1);
+  sprite.position.set(0, 11, 0);
+  sprite.renderOrder = 10;
+  return sprite;
+}
+
 export function GraphExplorer({
   graph, onOpenMapping, onOpenOntology,
 }: {
@@ -40,7 +74,7 @@ export function GraphExplorer({
   const [history, setHistory] = useState<Array<string | null>>([null]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [hiddenKinds, setHiddenKinds] = useState<string[]>([]);
-  const [showLabels, setShowLabels] = useState(false);
+  const [showLabels, setShowLabels] = useState(true);
   const [filterOpen, setFilterOpen] = useState(false);
   const [nodeLimit, setNodeLimit] = useState(750);
 
@@ -167,14 +201,36 @@ export function GraphExplorer({
   const renderLabel = (rawNode: NodeObject2D, context: CanvasRenderingContext2D, scale: number) => {
     const node = rawNode as NodeObject2D<VisualNode>;
     if (!showLabels || node.x === undefined || node.y === undefined || (!focusId && data.nodes.length > 900 && scale < 1.6)) return;
-    const fontSize = Math.max(3.2, 10 / scale);
-    const label = String(node.name);
+    const fontSize = Math.max(3.6, 11 / scale);
+    const label = String(node.name).length > 28 ? `${String(node.name).slice(0, 27)}…` : String(node.name);
+    const labelY = node.y + 7 / scale;
+    const paddingX = 3 / scale;
+    const paddingY = 2 / scale;
     context.font = `600 ${fontSize}px Inter, sans-serif`;
     context.textAlign = "center";
     context.textBaseline = "top";
-    context.fillStyle = "rgba(225,232,247,.88)";
-    context.fillText(label.length > 28 ? `${label.slice(0, 27)}…` : label, node.x, node.y + 5 / scale);
+    const textWidth = context.measureText(label).width;
+    context.fillStyle = "rgba(7, 11, 18, .82)";
+    context.fillRect(node.x - textWidth / 2 - paddingX, labelY - paddingY, textWidth + paddingX * 2, fontSize + paddingY * 2);
+    context.fillStyle = selected?.id === node.id ? "#ffffff" : "rgba(225, 232, 247, .92)";
+    context.fillText(label, node.x, labelY);
   };
+
+  const paintNodePointerArea = (rawNode: NodeObject2D, color: string, context: CanvasRenderingContext2D, scale: number) => {
+    const node = rawNode as NodeObject2D<VisualNode>;
+    if (node.x === undefined || node.y === undefined) return;
+    const hitRadius = Math.max(8 / scale, 4.5);
+    context.beginPath();
+    context.arc(node.x, node.y, hitRadius, 0, 2 * Math.PI);
+    context.fillStyle = color;
+    context.fill();
+  };
+
+  const render3dLabel = useCallback((rawNode: NodeObject3D) => {
+    const label = create3dLabel(rawNode as VisualNode);
+    label.visible = showLabels;
+    return label;
+  }, [showLabels]);
 
   if (graph.nodes.length === 0) return <div className="workspace-view graph-view"><header className="stage-header"><div><span className="eyebrow">Graph explorer</span><h1>Explore</h1><p>Navigate ontology instances and their relationships.</p></div></header><div className="empty-graph"><DatabaseZap size={34}/><h2>No imported data yet</h2><p>Map a source file to ontology object and link types, then import it.</p><button className="button primary" onClick={onOpenMapping}>Open data mapping</button></div></div>;
 
@@ -182,7 +238,7 @@ export function GraphExplorer({
     <header className="explorer-header"><div><span className="eyebrow">Knowledge graph</span><h1>{graph.sourceName || "Explore"}</h1><p>{graph.nodes.length.toLocaleString("de-DE")} indexed objects · {graph.links.length.toLocaleString("de-DE")} relationships</p></div><div className="binding-pills">{graph.ontologyBindings.objectTypes.map((type) => <span key={type}>Object · {type}</span>)}{graph.ontologyBindings.linkTypes.map((type) => <span key={type}>Link · {type}</span>)}</div></header>
     <div className="explorer-commandbar"><div className="explorer-tabs"><button className="active">Explore</button><button onClick={onOpenOntology}>Schema</button></div><div className="explorer-actions"><div className="explorer-search"><Search size={14}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search objects…"/>{query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={13}/></button>}{searchResults.length > 0 && <div className="search-results">{searchResults.map((node) => <button key={node.id} onClick={() => { navigateTo(node.id); setQuery(""); }}><i style={{ background: node.color }}/><span><strong>{node.name}</strong><small>{node.kind} · {node.id}</small></span></button>)}</div>}</div><button className={filterOpen ? "active" : ""} onClick={() => setFilterOpen((open) => !open)}><Filter size={14}/> Filter</button><label className="limit-select">Show<select value={nodeLimit} onChange={(event) => setNodeLimit(Number(event.target.value))}><option value={250}>250</option><option value={500}>500</option><option value={750}>750</option><option value={1000}>1.000</option><option value={2000}>2.000</option><option value={5000}>5.000</option></select></label><div className="view-switch"><button className={mode === "2d" ? "active" : ""} onClick={() => switchMode("2d")}><Network size={14}/> 2D</button><button className={mode === "3d" ? "active" : ""} onClick={() => switchMode("3d")}><Box size={14}/> 3D</button></div></div></div>
     <div className="explorer-canvas-shell">
-      <div className="graph-canvas orbit-canvas">{mode === "2d" ? <ForceGraph2D ref={graph2dRef} graphData={data} nodeLabel={(node) => `${node.name} · ${node.kind}`} nodeColor="color" nodeVal={(node) => 1.5 + Math.sqrt(Number(node.degree ?? 0) + 1)} nodeRelSize={4} nodeCanvasObjectMode={() => "after"} nodeCanvasObject={renderLabel} linkLabel="label" linkWidth={(link) => focusId && (endpointId(link.source) === focusId || endpointId(link.target) === focusId) ? 2.2 : .75} linkColor={(link) => linkColors[String(link.label)] ?? "#566889"} linkDirectionalArrowLength={3.5} linkDirectionalArrowRelPos={1} linkCurvature={.08} cooldownTicks={120} onEngineStop={fitGraph} onNodeClick={(node, event) => { const visualNode = node as VisualNode; centerNode(visualNode); if (event.detail >= 2) navigateTo(visualNode.id); }} onBackgroundClick={() => setSelected(null)} enableNodeDrag enablePanInteraction enableZoomInteraction backgroundColor="#090c13"/> : <ForceGraph3D ref={graph3dRef} graphData={data} nodeLabel={(node) => `${node.name} · ${node.kind}`} nodeColor="color" nodeVal={(node) => 1.5 + Math.sqrt(Number(node.degree ?? 0) + 1)} nodeRelSize={6} linkLabel="label" linkWidth={(link) => focusId && (endpointId(link.source) === focusId || endpointId(link.target) === focusId) ? 2.2 : 1} linkColor={(link) => linkColors[String(link.label)] ?? "#60769c"} linkOpacity={.68} linkDirectionalArrowLength={4} linkDirectionalParticles={focusId ? 1 : 0} linkDirectionalParticleWidth={1.4} cooldownTicks={120} onEngineStop={fitGraph} onNodeClick={(node, event) => { const visualNode = node as VisualNode; centerNode(visualNode); if (event.detail >= 2) navigateTo(visualNode.id); }} onBackgroundClick={() => setSelected(null)} enableNodeDrag enableNavigationControls backgroundColor="#090c13"/>}</div>
+      <div className="graph-canvas orbit-canvas">{mode === "2d" ? <ForceGraph2D ref={graph2dRef} graphData={data} nodeLabel={(node) => `${node.name} · ${node.kind}`} nodeColor="color" nodeVal={(node) => 1.5 + Math.sqrt(Number(node.degree ?? 0) + 1)} nodeRelSize={4} nodeCanvasObjectMode={() => "after"} nodeCanvasObject={renderLabel} nodePointerAreaPaint={paintNodePointerArea} linkLabel="label" linkWidth={(link) => focusId && (endpointId(link.source) === focusId || endpointId(link.target) === focusId) ? 2.2 : .75} linkColor={(link) => linkColors[String(link.label)] ?? "#566889"} linkDirectionalArrowLength={3.5} linkDirectionalArrowRelPos={1} linkCurvature={.08} cooldownTicks={120} onEngineStop={fitGraph} onNodeClick={(node, event) => { const visualNode = node as VisualNode; centerNode(visualNode); if (event.detail >= 2) navigateTo(visualNode.id); }} onBackgroundClick={() => setSelected(null)} enableNodeDrag enablePanInteraction enableZoomInteraction backgroundColor="#090c13"/> : <ForceGraph3D ref={graph3dRef} graphData={data} nodeLabel={(node) => `${node.name} · ${node.kind}`} nodeColor="color" nodeVal={(node) => 1.5 + Math.sqrt(Number(node.degree ?? 0) + 1)} nodeRelSize={6} nodeThreeObject={render3dLabel} nodeThreeObjectExtend linkLabel="label" linkWidth={(link) => focusId && (endpointId(link.source) === focusId || endpointId(link.target) === focusId) ? 2.2 : 1} linkColor={(link) => linkColors[String(link.label)] ?? "#60769c"} linkOpacity={.68} linkDirectionalArrowLength={4} linkDirectionalParticles={focusId ? 1 : 0} linkDirectionalParticleWidth={1.4} cooldownTicks={120} onEngineStop={fitGraph} onNodeClick={(node, event) => { const visualNode = node as VisualNode; centerNode(visualNode); if (event.detail >= 2) navigateTo(visualNode.id); }} onBackgroundClick={() => setSelected(null)} enableNodeDrag enableNavigationControls backgroundColor="#090c13"/>}</div>
 
       <aside className="entity-legend"><div className="overlay-heading"><Layers3 size={14}/><strong>Entities</strong></div>{kindSummary.map(([kind, summary]) => <button className={hiddenKinds.includes(kind) ? "disabled" : ""} key={kind} onClick={() => toggleKind(kind)}><i style={{ background: summary.color }}/><span>{kind}</span><strong>{summary.count.toLocaleString("de-DE")}</strong></button>)}<div className="legend-divider"/><label><span><Tags size={13}/> Show labels</span><input type="checkbox" checked={showLabels} onChange={(event) => setShowLabels(event.target.checked)}/></label></aside>
 
