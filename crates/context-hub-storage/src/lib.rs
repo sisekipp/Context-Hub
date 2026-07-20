@@ -32,6 +32,17 @@ pub struct GraphFilter {
     pub property: String,
     pub operator: FilterOperator,
     pub value: String,
+    #[serde(default)]
+    pub index_kind: Option<PropertyIndexKind>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropertyIndexKind {
+    String,
+    Number,
+    Boolean,
+    Timestamp,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -106,14 +117,10 @@ pub fn compile_graph_query(query: &GraphQuery) -> Result<CompiledGraphQuery, Que
         current = next;
     }
 
-    parameters.extend([
-        query.workspace_id.to_string(),
-        query.ontology_version_id.to_string(),
-        query.root_type.clone(),
-    ]);
-
+    let mut index_joins = String::new();
     let mut filters = String::new();
-    for filter in &query.filters {
+    let mut json_filter_parameters = Vec::new();
+    for (index, filter) in query.filters.iter().enumerate() {
         validate_graph_identifier(&filter.property)?;
         let operation = match filter.operator {
             FilterOperator::Equal => "=",
@@ -122,18 +129,45 @@ pub fn compile_graph_query(query: &GraphQuery) -> Result<CompiledGraphQuery, Que
             FilterOperator::GreaterThan => ">",
             FilterOperator::LessThan => "<",
         };
+        if let Some(kind) = filter.index_kind {
+            let table = match kind {
+                PropertyIndexKind::String => "property_string_index",
+                PropertyIndexKind::Number => "property_number_index",
+                PropertyIndexKind::Boolean => "property_boolean_index",
+                PropertyIndexKind::Timestamp => "property_timestamp_index",
+            };
+            let alias = format!("p{index}");
+            write!(
+                &mut index_joins,
+                " JOIN {table} AS {alias} FINAL ON {alias}.workspace_id = n0.workspace_id AND {alias}.ontology_version_id = n0.ontology_version_id AND {alias}.object_type = n0.object_type AND {alias}.object_id = n0.object_id AND {alias}.version = n0.version AND {alias}.property = ? AND {alias}.value {operation} ? AND {alias}.deleted = false"
+            )
+            .expect("writing to a String cannot fail");
+            parameters.push(filter.property.clone());
+            parameters.push(if matches!(filter.operator, FilterOperator::Contains) {
+                format!("%{}%", filter.value)
+            } else {
+                filter.value.clone()
+            });
+            continue;
+        }
         write!(
             &mut filters,
             " AND toString(n0.properties.{}) {operation} ?",
             filter.property
         )
         .expect("writing to a String cannot fail");
-        parameters.push(if matches!(filter.operator, FilterOperator::Contains) {
+        json_filter_parameters.push(if matches!(filter.operator, FilterOperator::Contains) {
             format!("%{}%", filter.value)
         } else {
             filter.value.clone()
         });
     }
+    parameters.extend([
+        query.workspace_id.to_string(),
+        query.ontology_version_id.to_string(),
+        query.root_type.clone(),
+    ]);
+    parameters.extend(json_filter_parameters);
     let cursor = if let Some(after_object_id) = &query.after_object_id {
         parameters.push(after_object_id.clone());
         format!(" AND {current}.object_id > ?")
@@ -141,7 +175,7 @@ pub fn compile_graph_query(query: &GraphQuery) -> Result<CompiledGraphQuery, Que
         String::new()
     };
     let sql = format!(
-        "SELECT DISTINCT {current}.object_id, {current}.object_type, toJSONString({current}.properties) FROM graph_nodes AS n0 FINAL{joins} WHERE n0.workspace_id = ? AND n0.ontology_version_id = ? AND n0.object_type = ? AND n0.deleted = false{filters}{cursor} ORDER BY {current}.object_id LIMIT {limit}"
+        "SELECT DISTINCT {current}.object_id, {current}.object_type, toJSONString({current}.properties) FROM graph_nodes AS n0 FINAL{joins}{index_joins} WHERE n0.workspace_id = ? AND n0.ontology_version_id = ? AND n0.object_type = ? AND n0.deleted = false{filters}{cursor} ORDER BY {current}.object_id LIMIT {limit}"
     );
     Ok(CompiledGraphQuery { sql, parameters })
 }
@@ -1181,6 +1215,7 @@ mod tests {
                 property: "name".into(),
                 operator: FilterOperator::Contains,
                 value: "billing' OR 1=1".into(),
+                index_kind: None,
             }],
             traversal: vec![TraversalStep {
                 link_type: "owned_by".into(),
@@ -1194,6 +1229,38 @@ mod tests {
         assert!(compiled.sql.contains("n0.workspace_id = ?"));
         assert!(!compiled.sql.contains("billing"));
         assert_eq!(compiled.parameters.last().unwrap(), "%billing' OR 1=1%");
+    }
+
+    #[test]
+    fn graph_query_uses_a_typed_property_index() {
+        let query = GraphQuery {
+            workspace_id: Uuid::nil(),
+            ontology_version_id: Uuid::nil(),
+            root_type: "service".into(),
+            filters: vec![GraphFilter {
+                property: "score".into(),
+                operator: FilterOperator::GreaterThan,
+                value: "4.5".into(),
+                index_kind: Some(PropertyIndexKind::Number),
+            }],
+            traversal: vec![],
+            after_object_id: None,
+            limit: 50,
+        };
+
+        let compiled = compile_graph_query(&query).unwrap();
+
+        assert!(
+            compiled
+                .sql
+                .contains("JOIN property_number_index AS p0 FINAL")
+        );
+        assert!(compiled.sql.contains("p0.version = n0.version"));
+        assert!(compiled.sql.contains("p0.value > ?"));
+        assert!(!compiled.sql.contains("properties.score"));
+        assert_eq!(compiled.parameters[0], "score");
+        assert_eq!(compiled.parameters[1], "4.5");
+        assert_eq!(compiled.parameters[4], "service");
     }
 
     #[test]
@@ -1254,6 +1321,60 @@ mod tests {
         let workspace_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let ontology_version_id = Uuid::new_v4();
         let source_id = Uuid::new_v4();
+        write_clickhouse_graph_fixture(&repository, workspace_id, ontology_version_id, source_id)
+            .await;
+
+        let nodes = repository
+            .query_nodes(&GraphQuery {
+                workspace_id,
+                ontology_version_id,
+                root_type: "service".into(),
+                filters: vec![],
+                traversal: vec![],
+                after_object_id: None,
+                limit: 10,
+            })
+            .await
+            .expect("nodes can be queried from ClickHouse");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].object_id, "service:test");
+        assert_typed_index_filters(&repository, workspace_id, ontology_version_id).await;
+        let traversed = repository
+            .query_nodes(&GraphQuery {
+                workspace_id,
+                ontology_version_id,
+                root_type: "service".into(),
+                filters: vec![],
+                traversal: vec![TraversalStep {
+                    link_type: "owned_by".into(),
+                    target_type: "team".into(),
+                    reverse: false,
+                }],
+                after_object_id: None,
+                limit: 10,
+            })
+            .await
+            .expect("ClickHouse traversal can be queried");
+        assert_eq!(traversed.len(), 1);
+        assert_eq!(traversed[0].object_id, "team:platform");
+        let edges = repository
+            .edges_between(
+                workspace_id,
+                ontology_version_id,
+                &["service:test".into(), "team:platform".into()],
+                10,
+            )
+            .await
+            .expect("edges can be queried from ClickHouse");
+        assert_eq!(edges.len(), 1);
+    }
+
+    async fn write_clickhouse_graph_fixture(
+        repository: &ClickHouseGraphRepository,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        source_id: Uuid,
+    ) {
         repository
             .write_graph(
                 &[
@@ -1264,8 +1385,27 @@ mod tests {
                         object_id: "service:test".into(),
                         source_id,
                         external_id: "test".into(),
-                        properties_json: r#"{"name":"Test"}"#.into(),
-                        property_indexes: vec![],
+                        properties_json: r#"{"name":"Test","score":4.5,"enabled":true,"observed_at":"2026-07-21T10:11:12Z"}"#.into(),
+                        property_indexes: vec![
+                            PropertyIndexWrite {
+                                property: "name".into(),
+                                value: PropertyIndexValue::String("Test".into()),
+                            },
+                            PropertyIndexWrite {
+                                property: "score".into(),
+                                value: PropertyIndexValue::Number("4.5".into()),
+                            },
+                            PropertyIndexWrite {
+                                property: "enabled".into(),
+                                value: PropertyIndexValue::Boolean(true),
+                            },
+                            PropertyIndexWrite {
+                                property: "observed_at".into(),
+                                value: PropertyIndexValue::Timestamp(
+                                    "2026-07-21 10:11:12.000000".into(),
+                                ),
+                            },
+                        ],
                         version: 1,
                     },
                     GraphNodeWrite {
@@ -1296,49 +1436,59 @@ mod tests {
             )
             .await
             .expect("graph batch can be written to ClickHouse");
+    }
 
-        let nodes = repository
-            .query_nodes(&GraphQuery {
-                workspace_id,
-                ontology_version_id,
-                root_type: "service".into(),
-                filters: vec![],
-                traversal: vec![],
-                after_object_id: None,
-                limit: 10,
-            })
-            .await
-            .expect("nodes can be queried from ClickHouse");
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].object_id, "service:test");
-        let traversed = repository
-            .query_nodes(&GraphQuery {
-                workspace_id,
-                ontology_version_id,
-                root_type: "service".into(),
-                filters: vec![],
-                traversal: vec![TraversalStep {
-                    link_type: "owned_by".into(),
-                    target_type: "team".into(),
-                    reverse: false,
-                }],
-                after_object_id: None,
-                limit: 10,
-            })
-            .await
-            .expect("ClickHouse traversal can be queried");
-        assert_eq!(traversed.len(), 1);
-        assert_eq!(traversed[0].object_id, "team:platform");
-        let edges = repository
-            .edges_between(
-                workspace_id,
-                ontology_version_id,
-                &["service:test".into(), "team:platform".into()],
-                10,
-            )
-            .await
-            .expect("edges can be queried from ClickHouse");
-        assert_eq!(edges.len(), 1);
+    async fn assert_typed_index_filters(
+        repository: &ClickHouseGraphRepository,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+    ) {
+        for (property, operator, value, index_kind) in [
+            (
+                "name",
+                FilterOperator::Contains,
+                "est",
+                PropertyIndexKind::String,
+            ),
+            (
+                "score",
+                FilterOperator::GreaterThan,
+                "4",
+                PropertyIndexKind::Number,
+            ),
+            (
+                "enabled",
+                FilterOperator::Equal,
+                "true",
+                PropertyIndexKind::Boolean,
+            ),
+            (
+                "observed_at",
+                FilterOperator::LessThan,
+                "2026-07-22 00:00:00.000000",
+                PropertyIndexKind::Timestamp,
+            ),
+        ] {
+            let filtered = repository
+                .query_nodes(&GraphQuery {
+                    workspace_id,
+                    ontology_version_id,
+                    root_type: "service".into(),
+                    filters: vec![GraphFilter {
+                        property: property.into(),
+                        operator,
+                        value: value.into(),
+                        index_kind: Some(index_kind),
+                    }],
+                    traversal: vec![],
+                    after_object_id: None,
+                    limit: 10,
+                })
+                .await
+                .expect("typed index filter can be queried from ClickHouse");
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].object_id, "service:test");
+        }
     }
 
     #[tokio::test]

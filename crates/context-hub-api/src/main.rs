@@ -1,6 +1,8 @@
 use std::{collections::HashMap, fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use chrono::{DateTime, NaiveDate, Utc};
+#[cfg(test)]
+use context_hub_api::context_hub::v1::GraphFilter as ApiGraphFilter;
 use context_hub_api::context_hub::v1::{
     CreateOntologyRequest, DataSource, GetIngestionJobRequest, GetObjectRequest,
     GetOntologyDraftRequest, GetUploadDataSourceRequest, GetUploadDataSourceResponse,
@@ -29,9 +31,9 @@ use context_hub_storage::{
     ClickHouseControlPlaneRepository, ClickHouseGraphRepository, ControlPlaneRepository,
     ControlPlaneSnapshot, FilterOperator as StorageFilterOperator, GraphEdgeWrite,
     GraphFilter as StorageGraphFilter, GraphNodeWrite, GraphQuery as StorageGraphQuery,
-    GraphRepository, ObjectStoreSourceRepository, PropertyIndexValue, PropertyIndexWrite,
-    SourceObjectStore, StorageError, StoredDataSource, StoredIngestionJob, StoredOntology,
-    StoredOntologyDraft, StoredOntologyMapping, StoredOntologyVersion,
+    GraphRepository, ObjectStoreSourceRepository, PropertyIndexKind, PropertyIndexValue,
+    PropertyIndexWrite, SourceObjectStore, StorageError, StoredDataSource, StoredIngestionJob,
+    StoredOntology, StoredOntologyDraft, StoredOntologyMapping, StoredOntologyVersion,
     TraversalStep as StorageTraversalStep,
 };
 #[cfg(test)]
@@ -1242,7 +1244,7 @@ impl GraphService for Runtime {
             .map_err(|error| Status::internal(format!("stored ontology is invalid: {error}")))?;
         validate_graph_query(&query, &definition)?;
         let limit = if query.limit == 0 { 500 } else { query.limit };
-        let storage_query = graph_query_to_storage(&query, limit)?;
+        let storage_query = graph_query_to_storage(&query, &definition, limit)?;
         let mut nodes_by_key = HashMap::new();
         let depth_count = storage_query.traversal.len() + 1;
         let mut cursor = decode_graph_cursor(&query.cursor, depth_count)?;
@@ -1642,7 +1644,16 @@ fn encode_graph_cursor(cursor: &GraphCursor) -> Result<String, Status> {
         .map_err(|error| Status::internal(format!("graph cursor serialization failed: {error}")))
 }
 
-fn graph_query_to_storage(query: &GraphQuery, limit: u32) -> Result<StorageGraphQuery, Status> {
+fn graph_query_to_storage(
+    query: &GraphQuery,
+    definition: &OntologyDefinition,
+    limit: u32,
+) -> Result<StorageGraphQuery, Status> {
+    let root = definition
+        .object_types
+        .iter()
+        .find(|object_type| object_type.api_name == query.root_type)
+        .ok_or_else(|| Status::invalid_argument("root type does not exist in the ontology"))?;
     let filters = query
         .filters
         .iter()
@@ -1664,10 +1675,18 @@ fn graph_query_to_storage(query: &GraphQuery, limit: u32) -> Result<StorageGraph
                     ));
                 }
             };
+            let property = root
+                .properties
+                .iter()
+                .find(|property| property.api_name == filter.property)
+                .ok_or_else(|| Status::invalid_argument("filter property does not exist"))?;
+            let index_kind = filter_index_kind(property, operator)?;
+            let value = normalize_filter_value(property, index_kind, &filter.values[0])?;
             Ok(StorageGraphFilter {
                 property: filter.property.clone(),
                 operator,
-                value: filter.values[0].clone(),
+                value,
+                index_kind,
             })
         })
         .collect::<Result<Vec<_>, Status>>()?;
@@ -1688,6 +1707,98 @@ fn graph_query_to_storage(query: &GraphQuery, limit: u32) -> Result<StorageGraph
         after_object_id: None,
         limit,
     })
+}
+
+fn filter_index_kind(
+    property: &PropertyDefinition,
+    operator: StorageFilterOperator,
+) -> Result<Option<PropertyIndexKind>, Status> {
+    if !property.indexed || matches!(operator, StorageFilterOperator::NotEqual) {
+        return Ok(None);
+    }
+    let kind = match &property.value_type.scalar {
+        ScalarType::String | ScalarType::Uuid | ScalarType::Enum { .. } => {
+            PropertyIndexKind::String
+        }
+        ScalarType::Int64 | ScalarType::Float64 | ScalarType::Decimal => {
+            if matches!(operator, StorageFilterOperator::Contains) {
+                return Err(Status::invalid_argument(
+                    "contains filters require a string property",
+                ));
+            }
+            PropertyIndexKind::Number
+        }
+        ScalarType::Boolean => {
+            if !matches!(operator, StorageFilterOperator::Equal) {
+                return Err(Status::invalid_argument(
+                    "boolean filters only support equality",
+                ));
+            }
+            PropertyIndexKind::Boolean
+        }
+        ScalarType::Date | ScalarType::Timestamp => {
+            if matches!(operator, StorageFilterOperator::Contains) {
+                return Err(Status::invalid_argument(
+                    "contains filters require a string property",
+                ));
+            }
+            PropertyIndexKind::Timestamp
+        }
+        ScalarType::Json => return Ok(None),
+    };
+    Ok(Some(kind))
+}
+
+fn normalize_filter_value(
+    property: &PropertyDefinition,
+    index_kind: Option<PropertyIndexKind>,
+    value: &str,
+) -> Result<String, Status> {
+    match index_kind {
+        None | Some(PropertyIndexKind::String) => Ok(value.to_owned()),
+        Some(PropertyIndexKind::Number) => {
+            value.parse::<f64>().map_err(|_| {
+                Status::invalid_argument(format!(
+                    "filter for '{}' requires a number",
+                    property.api_name
+                ))
+            })?;
+            Ok(value.to_owned())
+        }
+        Some(PropertyIndexKind::Boolean) => value
+            .parse::<bool>()
+            .map(|parsed| parsed.to_string())
+            .map_err(|_| {
+                Status::invalid_argument(format!(
+                    "filter for '{}' requires true or false",
+                    property.api_name
+                ))
+            }),
+        Some(PropertyIndexKind::Timestamp) => match &property.value_type.scalar {
+            ScalarType::Date => NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .map(|date| format!("{date} 00:00:00.000000"))
+                .map_err(|_| {
+                    Status::invalid_argument(format!(
+                        "filter for '{}' requires a YYYY-MM-DD date",
+                        property.api_name
+                    ))
+                }),
+            ScalarType::Timestamp => DateTime::parse_from_rfc3339(value)
+                .map(|timestamp| {
+                    timestamp
+                        .with_timezone(&Utc)
+                        .format("%Y-%m-%d %H:%M:%S%.6f")
+                        .to_string()
+                })
+                .map_err(|_| {
+                    Status::invalid_argument(format!(
+                        "filter for '{}' requires an RFC 3339 timestamp",
+                        property.api_name
+                    ))
+                }),
+            _ => unreachable!("timestamp indexes are only assigned to date-like properties"),
+        },
+    }
 }
 
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, Status> {
@@ -2462,6 +2573,26 @@ mod tests {
         let graph = query_service_page(runtime, &version.id, 10, String::new()).await;
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].id, "service:billing");
+        let filtered = runtime
+            .query(Request::new(GraphQuery {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version.id.clone(),
+                root_type: "service".into(),
+                filters: vec![ApiGraphFilter {
+                    property: "id".into(),
+                    operator: 1,
+                    values: vec!["billing".into()],
+                }],
+                traversal: vec![],
+                projection: vec![],
+                limit: 10,
+                cursor: String::new(),
+            }))
+            .await
+            .expect("indexed graph filter can be queried")
+            .into_inner();
+        assert_eq!(filtered.nodes.len(), 1);
+        assert_eq!(filtered.nodes[0].id, "service:billing");
         (source.id, mapping.id, version.id, completed.id)
     }
 
