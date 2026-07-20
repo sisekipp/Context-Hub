@@ -127,6 +127,14 @@ message UploadDataSourceResponse {
   uint64 size_bytes = 3;
   string sha256 = 4;
 }
+message GetUploadDataSourceRequest { string id = 1; }
+message GetUploadDataSourceResponse {
+  DataSource data_source = 1;
+  string file_name = 2;
+  SourceFileFormat format = 3;
+  bytes content = 4;
+  string sha256 = 5;
+}
 
 message OntologyDataMapping {
   string id = 1;
@@ -147,6 +155,7 @@ message ListOntologyDataMappingsResponse { repeated OntologyDataMapping mappings
 service DataSourceService {
   rpc Save(SaveDataSourceRequest) returns (DataSource);
   rpc Upload(UploadDataSourceRequest) returns (UploadDataSourceResponse);
+  rpc GetUpload(GetUploadDataSourceRequest) returns (GetUploadDataSourceResponse);
   rpc List(ListDataSourcesRequest) returns (ListDataSourcesResponse);
   rpc SaveMapping(SaveOntologyDataMappingRequest) returns (OntologyDataMapping);
   rpc ListMappings(ListOntologyDataMappingsRequest) returns (ListOntologyDataMappingsResponse);

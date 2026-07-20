@@ -2,6 +2,7 @@ import { createClient } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import {
   DataSourceService,
+  DataSourceKind,
   GraphService,
   IngestionService,
   IngestionState,
@@ -24,6 +25,7 @@ const ingestions = createClient(IngestionService, transport);
 const graph = createClient(GraphService, transport);
 
 export type BackendOntology = { id: string; name: string; slug: string; activeVersionId: string };
+export type BackendDataSource = { id: string; name: string; fileName: string };
 
 export type BackendFieldMapping = {
   sourceField: string;
@@ -65,6 +67,30 @@ export async function uploadWorkspaceSource(file: File) {
     id: response.dataSource.id,
     objectKey: response.objectKey,
     sizeBytes: response.sizeBytes,
+    sha256: response.sha256,
+  };
+}
+
+export async function listWorkspaceDataSources(): Promise<BackendDataSource[]> {
+  const response = await dataSources.list({ workspaceId: DEV_WORKSPACE_ID });
+  return response.dataSources.flatMap((source) => {
+    if (source.kind !== DataSourceKind.UPLOAD) return [];
+    try {
+      const configuration = JSON.parse(source.configurationJson) as { file_name?: string };
+      return [{ id: source.id, name: source.name, fileName: configuration.file_name || source.name }];
+    } catch {
+      return [{ id: source.id, name: source.name, fileName: source.name }];
+    }
+  });
+}
+
+export async function downloadWorkspaceSource(id: string) {
+  const response = await dataSources.getUpload({ id });
+  if (!response.dataSource) throw new Error("The backend did not return the requested data source.");
+  return {
+    id: response.dataSource.id,
+    fileName: response.fileName,
+    content: response.content,
     sha256: response.sha256,
   };
 }

@@ -3,11 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Boxes, DatabaseZap, Orbit, Plus, Workflow } from "lucide-react";
 import { GraphExplorer } from "@/components/graph-explorer";
-import { MappingPanel, type BrowserDataSource } from "@/components/mapping-panel";
+import { MappingPanel, parseSource, type BrowserDataSource } from "@/components/mapping-panel";
 import { OntologyEditor } from "@/components/ontology-editor";
 import { emptyGraph, type ImportedGraph } from "@/lib/graph-data";
 import { defaultOntologyCatalog, type OntologyCatalog } from "@/lib/ontology-catalog";
-import { createWorkspaceOntology, listWorkspaceOntologies, loadPersistedGraph } from "@/lib/context-hub-client";
+import { createWorkspaceOntology, downloadWorkspaceSource, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph } from "@/lib/context-hub-client";
 
 type Section = "ontology" | "mapping" | "graph";
 type OntologyWorkspace = { id: string; name: string; slug: string; activeVersionId: string };
@@ -102,6 +102,17 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    void listWorkspaceDataSources()
+      .then((sources) => {
+        if (cancelled) return;
+        setDataSources(sources.map((source) => ({ id: source.id, fileName: source.fileName, records: [] })));
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
     if (section !== "graph" || graphs[activeOntology.id] || !activeOntology.activeVersionId || !activeCatalog.objectTypes.length || graphRequests.current.has(activeOntology.id)) return;
     graphRequests.current.add(activeOntology.id);
     void loadPersistedGraph(activeOntology, activeCatalog)
@@ -126,8 +137,32 @@ export default function Home() {
   }
 
   function registerDataSource(source: BrowserDataSource) {
-    setDataSources((items) => [...items, source]);
+    setDataSources((items) => [...items.filter((item) => item.id !== source.id), source]);
     setActiveDataSourceId(source.id);
+  }
+
+  async function selectDataSource(id: string) {
+    if (!id) {
+      setActiveDataSourceId("");
+      return;
+    }
+    const existing = dataSources.find((source) => source.id === id);
+    if (existing?.records.length) {
+      setActiveDataSourceId(id);
+      return;
+    }
+    try {
+      const downloaded = await downloadWorkspaceSource(id);
+      const hydrated = {
+        id: downloaded.id,
+        fileName: downloaded.fileName,
+        records: parseSource(downloaded.fileName, new TextDecoder().decode(downloaded.content)),
+      };
+      setDataSources((items) => items.map((source) => source.id === id ? hydrated : source));
+      setActiveDataSourceId(id);
+    } catch {
+      setActiveDataSourceId("");
+    }
   }
 
   async function loadMoreGraph() {
@@ -149,7 +184,7 @@ export default function Home() {
         <div className="brand"><span className="brand-mark"><Boxes size={19} /></span><span>ContextHub</span></div>
         <div className="workspace-card"><span className="eyebrow">Workspace</span><strong>Development</strong><span className="status"><i /> Connected</span></div>
         <div className="ontology-switcher"><div><span className="eyebrow">Ontology</span><button onClick={createOntology} title="Create ontology" aria-label="Create ontology"><Plus size={13}/></button></div><select aria-label="Active ontology" value={activeOntology.id} onChange={(event) => { saveRegistry({ ontologies, activeOntologyId: event.target.value }); setSection("ontology"); }}>{ontologies.map((ontology) => <option value={ontology.id} key={ontology.id}>{ontology.name}</option>)}</select><small>{ontologies.length} {ontologies.length === 1 ? "ontology" : "ontologies"} · shared data sources</small></div>
-        <div className="ontology-switcher source-switcher"><div><span className="eyebrow">Workspace source</span><DatabaseZap size={13}/></div><select aria-label="Active data source" value={activeDataSourceId} disabled={!dataSources.length} onChange={(event) => setActiveDataSourceId(event.target.value)}><option value="">{dataSources.length ? "Select source" : "Load a file in Data mapping"}</option>{dataSources.map((source) => <option value={source.id} key={source.id}>{source.fileName}</option>)}</select><small>{dataSources.length ? "Reusable by every ontology in this session" : "Sources are shared; mappings stay isolated"}</small></div>
+        <div className="ontology-switcher source-switcher"><div><span className="eyebrow">Workspace source</span><DatabaseZap size={13}/></div><select aria-label="Active data source" value={activeDataSourceId} disabled={!dataSources.length} onChange={(event) => void selectDataSource(event.target.value)}><option value="">{dataSources.length ? "Select source" : "Load a file in Data mapping"}</option>{dataSources.map((source) => <option value={source.id} key={source.id}>{source.fileName}</option>)}</select><small>{dataSources.length ? "Persisted in ClickHouse · files in MinIO" : "Sources are shared; mappings stay isolated"}</small></div>
         <nav aria-label="Main navigation">
           {sections.map(({ id, label, icon: Icon }) => (
             <button className={section === id ? "nav-item active" : "nav-item"} key={id} onClick={() => setSection(id)}>

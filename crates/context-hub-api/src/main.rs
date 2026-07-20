@@ -3,15 +3,16 @@ use std::{collections::HashMap, fmt::Write as _, net::SocketAddr, sync::Arc};
 use chrono::Utc;
 use context_hub_api::context_hub::v1::{
     CreateOntologyRequest, DataSource, GetIngestionJobRequest, GetObjectRequest,
-    GetOntologyDraftRequest, GetWorkspaceRequest, GraphEdge, GraphNode, GraphQuery,
-    ImportGraphRequest, IngestionJob, IngestionState, ListDataSourcesRequest,
-    ListDataSourcesResponse, ListOntologiesRequest, ListOntologiesResponse,
-    ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse, ListOntologyVersionsRequest,
-    ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology, OntologyDataMapping,
-    OntologyDraft, OntologyVersion, PublishOntologyRequest, QueryGraphResponse,
-    SaveDataSourceRequest, SaveOntologyDataMappingRequest, SaveOntologyDraftRequest,
-    StartIngestionRequest, UploadDataSourceRequest, UploadDataSourceResponse,
-    ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue, Workspace,
+    GetOntologyDraftRequest, GetUploadDataSourceRequest, GetUploadDataSourceResponse,
+    GetWorkspaceRequest, GraphEdge, GraphNode, GraphQuery, ImportGraphRequest, IngestionJob,
+    IngestionState, ListDataSourcesRequest, ListDataSourcesResponse, ListOntologiesRequest,
+    ListOntologiesResponse, ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse,
+    ListOntologyVersionsRequest, ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology,
+    OntologyDataMapping, OntologyDraft, OntologyVersion, PublishOntologyRequest,
+    QueryGraphResponse, SaveDataSourceRequest, SaveOntologyDataMappingRequest,
+    SaveOntologyDraftRequest, StartIngestionRequest, UploadDataSourceRequest,
+    UploadDataSourceResponse, ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue,
+    Workspace,
     data_source_service_server::{DataSourceService, DataSourceServiceServer},
     graph_service_server::{GraphService, GraphServiceServer},
     ingestion_service_server::{IngestionService, IngestionServiceServer},
@@ -64,6 +65,8 @@ struct UploadSourceConfiguration {
     size_bytes: u64,
     sha256: String,
 }
+
+const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GraphCursor {
@@ -489,27 +492,7 @@ impl Runtime {
         mapping: &OntologyDataMapping,
         version: &OntologyVersion,
     ) -> Result<context_hub_mapping::MappedGraphBatch, String> {
-        let configuration: UploadSourceConfiguration =
-            serde_json::from_str(&source.configuration_json)
-                .map_err(|error| format!("source is not an uploaded object: {error}"))?;
-        let content = self
-            .source_store
-            .get(&configuration.object_key)
-            .await
-            .map_err(|error| error.to_string())?;
-        if content.len() as u64 != configuration.size_bytes {
-            return Err("uploaded object size no longer matches its source definition".into());
-        }
-        let checksum =
-            Sha256::digest(&content)
-                .iter()
-                .fold(String::with_capacity(64), |mut output, byte| {
-                    write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
-                    output
-                });
-        if checksum != configuration.sha256 {
-            return Err("uploaded object checksum mismatch".into());
-        }
+        let (configuration, content) = self.read_uploaded_source(source).await?;
         let document: MappingDocument = serde_json::from_str(&mapping.mapping_plan_json)
             .map_err(|error| format!("mapping document is invalid: {error}"))?;
         document
@@ -524,6 +507,47 @@ impl Runtime {
             execute_source_mapping_bundle(document.plans(), configuration.format, &content)
                 .await
                 .map_err(|error| error.to_string())?;
+        self.write_mapped_graph(source, version, &mapped).await?;
+        Ok(mapped)
+    }
+
+    async fn read_uploaded_source(
+        &self,
+        source: &DataSource,
+    ) -> Result<(UploadSourceConfiguration, Vec<u8>), String> {
+        let configuration: UploadSourceConfiguration =
+            serde_json::from_str(&source.configuration_json)
+                .map_err(|error| format!("source is not an uploaded object: {error}"))?;
+        let content = self
+            .source_store
+            .get(&configuration.object_key)
+            .await
+            .map_err(|error| error.to_string())?;
+        if content.len() as u64 != configuration.size_bytes {
+            return Err("uploaded object size no longer matches its source definition".into());
+        }
+        if content.len() > MAX_UPLOAD_BYTES {
+            return Err("uploaded object exceeds the 32 MiB development limit".into());
+        }
+        let checksum =
+            Sha256::digest(&content)
+                .iter()
+                .fold(String::with_capacity(64), |mut output, byte| {
+                    write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+                    output
+                });
+        if checksum != configuration.sha256 {
+            return Err("uploaded object checksum mismatch".into());
+        }
+        Ok((configuration, content))
+    }
+
+    async fn write_mapped_graph(
+        &self,
+        source: &DataSource,
+        version: &OntologyVersion,
+        mapped: &context_hub_mapping::MappedGraphBatch,
+    ) -> Result<(), String> {
         let workspace_id = Uuid::parse_str(&source.workspace_id)
             .map_err(|error| format!("workspace id is invalid: {error}"))?;
         let ontology_version_id = Uuid::parse_str(&version.id)
@@ -583,7 +607,7 @@ impl Runtime {
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        Ok(mapped)
+        Ok(())
     }
 }
 
@@ -860,7 +884,6 @@ impl DataSourceService for Runtime {
         &self,
         request: Request<UploadDataSourceRequest>,
     ) -> Result<Response<UploadDataSourceResponse>, Status> {
-        const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
         let request = request.into_inner();
         if request.workspace_id != dev_workspace_id() {
             return Err(Status::permission_denied("workspace is not accessible"));
@@ -921,6 +944,39 @@ impl DataSourceService for Runtime {
             object_key,
             size_bytes,
             sha256: checksum,
+        }))
+    }
+
+    async fn get_upload(
+        &self,
+        request: Request<GetUploadDataSourceRequest>,
+    ) -> Result<Response<GetUploadDataSourceResponse>, Status> {
+        let id = request.into_inner().id;
+        let source = self
+            .data_sources
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("data source not found"))?;
+        if source.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if source.kind != 1 {
+            return Err(Status::failed_precondition(
+                "data source is not an uploaded file",
+            ));
+        }
+        let (configuration, content) = self
+            .read_uploaded_source(&source)
+            .await
+            .map_err(Status::failed_precondition)?;
+        Ok(Response::new(GetUploadDataSourceResponse {
+            data_source: Some(source),
+            file_name: configuration.file_name,
+            format: proto_source_format(configuration.format),
+            content,
+            sha256: configuration.sha256,
         }))
     }
 
@@ -1535,6 +1591,14 @@ fn source_format(value: i32) -> Result<SourceFormat, Status> {
     }
 }
 
+const fn proto_source_format(value: SourceFormat) -> i32 {
+    match value {
+        SourceFormat::Json => 1,
+        SourceFormat::Ndjson => 2,
+        SourceFormat::Csv => 3,
+    }
+}
+
 fn safe_file_name(value: &str) -> String {
     let value = value
         .rsplit(['/', '\\'])
@@ -1848,7 +1912,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(OntologyServiceServer::new(runtime.clone()))
         .add_service(
             DataSourceServiceServer::new(runtime.clone())
-                .max_decoding_message_size(34 * 1024 * 1024),
+                .max_decoding_message_size(34 * 1024 * 1024)
+                .max_encoding_message_size(34 * 1024 * 1024),
         )
         .add_service(
             IngestionServiceServer::new(runtime.clone())
@@ -2247,6 +2312,16 @@ mod tests {
             .expect("JSON source can be uploaded")
             .into_inner();
         let source = upload.data_source.expect("upload returns a data source");
+        let restored = runtime
+            .get_upload(Request::new(GetUploadDataSourceRequest {
+                id: source.id.clone(),
+            }))
+            .await
+            .expect("uploaded source can be restored")
+            .into_inner();
+        assert_eq!(restored.file_name, "services.json");
+        assert_eq!(restored.content, br#"[{"service_id":"billing"}]"#);
+        assert_eq!(restored.sha256.len(), 64);
         let plan = MappingPlan {
             id: Uuid::new_v4(),
             object_type: "service".into(),

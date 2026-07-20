@@ -30,6 +30,8 @@ ClickHouse is the unified control and data plane. Revisioned `ReplacingMergeTree
 
 Uploads are addressed through Apache Arrow's `object_store` abstraction. MinIO is only the local S3-compatible implementation; production can use another supported object-store backend without changing mapping execution.
 
+`DataSourceService.List` restores the workspace source registry from ClickHouse. `DataSourceService.GetUpload` is the bounded rehydration path for upload sources: it enforces workspace ownership, rejects non-upload connectors, reads the original MinIO object, and verifies its persisted size and SHA-256 checksum before returning at most the configured 32 MiB upload limit to the mapping UI.
+
 ## Security invariants
 
 - Every graph query carries a workspace ID derived from authenticated context, not from an unrestricted client choice in production mode.
