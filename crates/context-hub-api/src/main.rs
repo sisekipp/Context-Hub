@@ -65,6 +65,18 @@ struct UploadSourceConfiguration {
     sha256: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GraphCursor {
+    version: u8,
+    positions: Vec<GraphCursorPosition>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct GraphCursorPosition {
+    after_object_id: Option<String>,
+    done: bool,
+}
+
 impl Runtime {
     #[cfg(test)]
     async fn seeded() -> Self {
@@ -1116,17 +1128,22 @@ impl GraphService for Runtime {
         let limit = if query.limit == 0 { 500 } else { query.limit };
         let storage_query = graph_query_to_storage(&query, limit)?;
         let mut nodes_by_key = HashMap::new();
-        let mut truncated = false;
         let depth_count = storage_query.traversal.len() + 1;
+        let mut cursor = decode_graph_cursor(&query.cursor, depth_count)?;
         let per_depth_limit = (limit / u32::try_from(depth_count).unwrap_or(1)).max(1);
         for depth in 0..=storage_query.traversal.len() {
+            if cursor.positions[depth].done {
+                continue;
+            }
             let remaining = limit as usize - nodes_by_key.len();
             if remaining == 0 {
-                truncated = true;
                 break;
             }
             let mut prefix = storage_query.clone();
             prefix.traversal.truncate(depth);
+            prefix
+                .after_object_id
+                .clone_from(&cursor.positions[depth].after_object_id);
             prefix.limit = per_depth_limit.min(
                 u32::try_from(remaining)
                     .expect("remaining node budget never exceeds the validated u32 query limit"),
@@ -1136,7 +1153,15 @@ impl GraphService for Runtime {
                 .query_nodes(&prefix)
                 .await
                 .map_err(storage_status)?;
-            truncated |= prefix_nodes.len() == remaining;
+            let has_more = prefix_nodes.len()
+                == usize::try_from(prefix.limit)
+                    .expect("validated graph query limits fit into usize");
+            if let Some(last) = prefix_nodes.last() {
+                cursor.positions[depth].after_object_id = Some(last.object_id.clone());
+                cursor.positions[depth].done = !has_more;
+            } else {
+                cursor.positions[depth].done = true;
+            }
             for node in prefix_nodes {
                 nodes_by_key.insert((node.object_type.clone(), node.object_id.clone()), node);
             }
@@ -1159,6 +1184,8 @@ impl GraphService for Runtime {
             )
             .await
             .map_err(storage_status)?;
+        let next_cursor = encode_graph_cursor(&cursor)?;
+        let truncated = !next_cursor.is_empty();
         Ok(Response::new(QueryGraphResponse {
             nodes: nodes
                 .into_iter()
@@ -1178,7 +1205,7 @@ impl GraphService for Runtime {
                     properties_json: edge.properties_json,
                 })
                 .collect(),
-            next_cursor: String::new(),
+            next_cursor,
             truncated,
         }))
     }
@@ -1321,10 +1348,8 @@ fn validate_properties_json(value: &str) -> Result<(), Status> {
 }
 
 fn validate_graph_query(query: &GraphQuery, definition: &OntologyDefinition) -> Result<(), Status> {
-    if !query.cursor.is_empty() {
-        return Err(Status::unimplemented(
-            "graph query cursors are not implemented yet",
-        ));
+    if query.cursor.len() > 16_384 {
+        return Err(Status::invalid_argument("graph query cursor is too large"));
     }
     if query.traversal.len() > 6 {
         return Err(Status::invalid_argument(
@@ -1377,6 +1402,31 @@ fn validate_graph_query(query: &GraphQuery, definition: &OntologyDefinition) -> 
     Ok(())
 }
 
+fn decode_graph_cursor(value: &str, depth_count: usize) -> Result<GraphCursor, Status> {
+    if value.is_empty() {
+        return Ok(GraphCursor {
+            version: 1,
+            positions: vec![GraphCursorPosition::default(); depth_count],
+        });
+    }
+    let cursor: GraphCursor = serde_json::from_str(value)
+        .map_err(|_| Status::invalid_argument("graph query cursor is invalid"))?;
+    if cursor.version != 1 || cursor.positions.len() != depth_count {
+        return Err(Status::invalid_argument(
+            "graph query cursor does not match the traversal",
+        ));
+    }
+    Ok(cursor)
+}
+
+fn encode_graph_cursor(cursor: &GraphCursor) -> Result<String, Status> {
+    if cursor.positions.iter().all(|position| position.done) {
+        return Ok(String::new());
+    }
+    serde_json::to_string(cursor)
+        .map_err(|error| Status::internal(format!("graph cursor serialization failed: {error}")))
+}
+
 fn graph_query_to_storage(query: &GraphQuery, limit: u32) -> Result<StorageGraphQuery, Status> {
     let filters = query
         .filters
@@ -1420,6 +1470,7 @@ fn graph_query_to_storage(query: &GraphQuery, limit: u32) -> Result<StorageGraph
                 reverse: step.reverse,
             })
             .collect(),
+        after_object_id: None,
         limit,
     })
 }
@@ -1896,35 +1947,37 @@ mod tests {
                 data_source_id: source.id,
                 ontology_mapping_id: mapping.id,
                 ontology_version_id: version.id.clone(),
-                nodes: vec![GraphNode {
-                    id: "service:billing".into(),
+                nodes: [
+                    ("billing", "Billing"),
+                    ("search", "Search"),
+                    ("users", "Users"),
+                ]
+                .into_iter()
+                .map(|(id, name)| GraphNode {
+                    id: format!("service:{id}"),
                     object_type: "service".into(),
-                    properties_json: r#"{"id":"billing","name":"Billing"}"#.into(),
-                }],
+                    properties_json: format!(r#"{{"id":"{id}","name":"{name}"}}"#),
+                })
+                .collect(),
                 edges: vec![],
             }))
             .await
             .expect("mapped graph can be imported")
             .into_inner();
         assert_eq!(job.state, IngestionState::Succeeded as i32);
-        assert_eq!(job.nodes_written, 1);
+        assert_eq!(job.nodes_written, 3);
 
-        let graph = runtime
-            .query(Request::new(GraphQuery {
-                workspace_id: dev_workspace_id(),
-                ontology_version_id: version.id.clone(),
-                root_type: "service".into(),
-                filters: vec![],
-                traversal: vec![],
-                projection: vec![],
-                limit: 50,
-                cursor: String::new(),
-            }))
-            .await
-            .expect("imported graph can be queried")
-            .into_inner();
-        assert_eq!(graph.nodes.len(), 1);
+        let graph = query_service_page(&runtime, &version.id, 2, String::new()).await;
+        assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.nodes[0].id, "service:billing");
+        assert!(!graph.next_cursor.is_empty());
+        assert!(graph.truncated);
+
+        let next_page = query_service_page(&runtime, &version.id, 2, graph.next_cursor).await;
+        assert_eq!(next_page.nodes.len(), 1);
+        assert_eq!(next_page.nodes[0].id, "service:users");
+        assert!(next_page.next_cursor.is_empty());
+        assert!(!next_page.truncated);
 
         let object = runtime
             .get_object(Request::new(GetObjectRequest {
@@ -1937,6 +1990,28 @@ mod tests {
             .expect("imported object can be fetched")
             .into_inner();
         assert!(object.properties_json.contains("Billing"));
+    }
+
+    async fn query_service_page(
+        runtime: &Runtime,
+        ontology_version_id: &str,
+        limit: u32,
+        cursor: String,
+    ) -> QueryGraphResponse {
+        runtime
+            .query(Request::new(GraphQuery {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: ontology_version_id.to_owned(),
+                root_type: "service".into(),
+                filters: vec![],
+                traversal: vec![],
+                projection: vec![],
+                limit,
+                cursor,
+            }))
+            .await
+            .expect("graph page can be queried")
+            .into_inner()
     }
 
     #[tokio::test]

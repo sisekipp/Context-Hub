@@ -217,6 +217,7 @@ th, td { padding: 9px 10px; border-bottom: 1px solid #202b3d; }
 .explorer-tabs button.active::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; content: ""; background: var(--accent); }
 .explorer-actions { display: flex; align-items: center; gap: 7px; }
 .explorer-actions > button, .limit-select { display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 9px; border: 1px solid transparent; border-radius: 7px; color: #aeb9cb; background: transparent; font-size: 10px; cursor: pointer; }
+.explorer-actions > button:disabled { opacity: .5; cursor: wait; }
 .explorer-actions > button:hover, .explorer-actions > button.active { border-color: var(--line); color: var(--text); background: #171e2a; }
 .limit-select { cursor: default; }
 .limit-select select { border: 0; outline: 0; color: #d1daea; background: transparent; font-size: 10px; }

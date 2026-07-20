@@ -25,6 +25,7 @@ export type ImportedGraph = {
   skippedCount: number;
   linkErrorCount: number;
   ontologyBindings: { objectTypes: string[]; linkTypes: string[] };
+  pagination?: { cursors: Array<string | null>; hasMore: boolean };
 };
 
 export const emptyGraph: ImportedGraph = {

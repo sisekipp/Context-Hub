@@ -22,6 +22,8 @@ pub struct GraphQuery {
     pub filters: Vec<GraphFilter>,
     #[serde(default)]
     pub traversal: Vec<TraversalStep>,
+    #[serde(default)]
+    pub after_object_id: Option<String>,
     pub limit: u32,
 }
 
@@ -132,8 +134,14 @@ pub fn compile_graph_query(query: &GraphQuery) -> Result<CompiledGraphQuery, Que
             filter.value.clone()
         });
     }
+    let cursor = if let Some(after_object_id) = &query.after_object_id {
+        parameters.push(after_object_id.clone());
+        format!(" AND {current}.object_id > ?")
+    } else {
+        String::new()
+    };
     let sql = format!(
-        "SELECT {current}.object_id, {current}.object_type, toJSONString({current}.properties) FROM graph_nodes AS n0 FINAL{joins} WHERE n0.workspace_id = ? AND n0.ontology_version_id = ? AND n0.object_type = ? AND n0.deleted = false{filters} ORDER BY {current}.object_id LIMIT {limit}"
+        "SELECT DISTINCT {current}.object_id, {current}.object_type, toJSONString({current}.properties) FROM graph_nodes AS n0 FINAL{joins} WHERE n0.workspace_id = ? AND n0.ontology_version_id = ? AND n0.object_type = ? AND n0.deleted = false{filters}{cursor} ORDER BY {current}.object_id LIMIT {limit}"
     );
     Ok(CompiledGraphQuery { sql, parameters })
 }
@@ -989,6 +997,10 @@ impl GraphRepository for MemoryGraphRepository {
                 node.workspace_id == query.workspace_id
                     && node.ontology_version_id == query.ontology_version_id
                     && current.contains(&node.object_id)
+                    && query
+                        .after_object_id
+                        .as_ref()
+                        .is_none_or(|cursor| node.object_id.as_str() > cursor.as_str())
             })
             .map(stored_node_from_write)
             .collect::<Vec<_>>();
@@ -1110,6 +1122,7 @@ mod tests {
                 target_type: "team".into(),
                 reverse: false,
             }],
+            after_object_id: None,
             limit: 50,
         };
         let compiled = compile_graph_query(&query).unwrap();
@@ -1132,12 +1145,30 @@ mod tests {
                     reverse: false,
                 })
                 .collect(),
+            after_object_id: None,
             limit: 10,
         };
         assert!(matches!(
             compile_graph_query(&query),
             Err(QueryError::TraversalTooDeep(7))
         ));
+    }
+
+    #[test]
+    fn graph_query_compiles_a_keyset_cursor() {
+        let query = GraphQuery {
+            workspace_id: Uuid::nil(),
+            ontology_version_id: Uuid::nil(),
+            root_type: "service".into(),
+            filters: vec![],
+            traversal: vec![],
+            after_object_id: Some("service:billing".into()),
+            limit: 25,
+        };
+        let compiled = compile_graph_query(&query).unwrap();
+        assert!(compiled.sql.starts_with("SELECT DISTINCT"));
+        assert!(compiled.sql.contains("n0.object_id > ?"));
+        assert_eq!(compiled.parameters.last().unwrap(), "service:billing");
     }
 
     #[tokio::test]
@@ -1206,6 +1237,7 @@ mod tests {
                 root_type: "service".into(),
                 filters: vec![],
                 traversal: vec![],
+                after_object_id: None,
                 limit: 10,
             })
             .await
@@ -1223,6 +1255,7 @@ mod tests {
                     target_type: "team".into(),
                     reverse: false,
                 }],
+                after_object_id: None,
                 limit: 10,
             })
             .await

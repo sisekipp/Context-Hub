@@ -209,28 +209,37 @@ export async function startIngestion(dataSourceId: string, mappingId: string, ve
 
 const graphColors = ["#7c9cff", "#5ed3b5", "#f7b267", "#c792ea", "#ff7d9d"];
 
-export async function loadPersistedGraph(ontology: BackendOntology, catalog: OntologyCatalog): Promise<ImportedGraph> {
+export async function loadPersistedGraph(
+  ontology: BackendOntology,
+  catalog: OntologyCatalog,
+  cursors?: Array<string | null>,
+): Promise<ImportedGraph> {
   if (!ontology.activeVersionId) throw new Error("This ontology has no published graph version yet.");
-  const requests = [
-    ...catalog.objectTypes.map((objectType) => graph.query({
+  const queries = [
+    ...catalog.objectTypes.map((objectType) => ({
       workspaceId: DEV_WORKSPACE_ID,
       ontologyVersionId: ontology.activeVersionId,
       rootType: objectType.apiName,
-      filters: [], traversal: [], projection: [], limit: 5_000, cursor: "",
+      filters: [], traversal: [], projection: [], limit: 2_000,
     })),
-    ...catalog.linkTypes.map((link) => graph.query({
+    ...catalog.linkTypes.map((link) => ({
       workspaceId: DEV_WORKSPACE_ID,
       ontologyVersionId: ontology.activeVersionId,
       rootType: link.sourceType,
       filters: [],
       traversal: [{ linkType: link.apiName, targetType: link.targetType, reverse: false }],
-      projection: [], limit: 5_000, cursor: "",
+      projection: [], limit: 2_000,
     })),
   ];
-  const responses = await Promise.all(requests);
+  const responses = await Promise.all(queries.map((query, index) => {
+    const cursor = cursors?.[index];
+    return cursor === null ? null : graph.query({ ...query, cursor: cursor ?? "" });
+  }));
+  const nextCursors = responses.map((response) => response?.nextCursor || null);
   const nodes = new Map<string, ImportedGraph["nodes"][number]>();
   const links = new Map<string, ImportedGraph["links"][number]>();
   for (const response of responses) {
+    if (!response) continue;
     for (const node of response.nodes) {
       const objectType = catalog.objectTypes.find((type) => type.apiName === node.objectType);
       const properties = JSON.parse(node.propertiesJson || "{}") as Record<string, GraphValue>;
@@ -265,5 +274,6 @@ export async function loadPersistedGraph(ontology: BackendOntology, catalog: Ont
       objectTypes: catalog.objectTypes.map((type) => type.apiName),
       linkTypes: catalog.linkTypes.map((type) => type.apiName),
     },
+    pagination: { cursors: nextCursors, hasMore: nextCursors.some((cursor) => cursor !== null) },
   };
 }

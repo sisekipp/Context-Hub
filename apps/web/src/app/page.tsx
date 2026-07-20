@@ -67,6 +67,7 @@ export default function Home() {
   const [graphs, setGraphs] = useState<Record<string, ImportedGraph>>({});
   const [dataSources, setDataSources] = useState<BrowserDataSource[]>([]);
   const [activeDataSourceId, setActiveDataSourceId] = useState("");
+  const [loadingMoreGraph, setLoadingMoreGraph] = useState(false);
   const graphRequests = useRef(new Set<string>());
   const savedRegistry = useSyncExternalStore(subscribeToRegistry, registrySnapshot, () => defaultRegistrySnapshot);
   const registry = useMemo(() => parseRegistry(savedRegistry), [savedRegistry]);
@@ -129,6 +130,19 @@ export default function Home() {
     setActiveDataSourceId(source.id);
   }
 
+  async function loadMoreGraph() {
+    const pagination = activeGraph.pagination;
+    if (!pagination?.hasMore || loadingMoreGraph) return;
+    const ontologyId = activeOntology.id;
+    setLoadingMoreGraph(true);
+    try {
+      const page = await loadPersistedGraph(activeOntology, activeCatalog, pagination.cursors);
+      setGraphs((items) => ({ ...items, [ontologyId]: mergeImportedGraphs(items[ontologyId] ?? emptyGraph, page) }));
+    } finally {
+      setLoadingMoreGraph(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -148,8 +162,24 @@ export default function Home() {
       <section className="main-stage">
         <div className={section === "ontology" ? "section-pane active" : "section-pane"}><OntologyEditor key={activeOntology.id} ontologyId={activeOntology.id} ontologyName={activeOntology.name} seedTemplate={activeOntology.slug === defaultOntology.slug} onRename={renameOntology} onCatalogChange={updateActiveCatalog} /></div>
         {section === "mapping" && <MappingPanel key={`${activeOntology.id}:${activeDataSource?.id ?? "new"}`} ontologyId={activeOntology.id} ontologyName={activeOntology.name} ontologySlug={activeOntology.slug} ontology={activeCatalog} dataSource={activeDataSource} onDataSourceLoaded={registerDataSource} onImport={(imported) => { setGraphs((items) => ({ ...items, [activeOntology.id]: imported })); setSection("graph"); }} />}
-        {section === "graph" && <GraphExplorer graph={activeGraph} onOpenMapping={() => setSection("mapping")} onOpenOntology={() => setSection("ontology")} />}
+        {section === "graph" && <GraphExplorer graph={activeGraph} onOpenMapping={() => setSection("mapping")} onOpenOntology={() => setSection("ontology")} onLoadMore={loadMoreGraph} canLoadMore={!!activeGraph.pagination?.hasMore} loadingMore={loadingMoreGraph} />}
       </section>
     </main>
   );
+}
+
+function mergeImportedGraphs(current: ImportedGraph, page: ImportedGraph): ImportedGraph {
+  const nodes = new Map(current.nodes.map((node) => [node.id, node]));
+  for (const node of page.nodes) nodes.set(node.id, node);
+  const linkKey = (link: ImportedGraph["links"][number]) => `${String(link.source)}\u0000${link.label}\u0000${String(link.target)}`;
+  const links = new Map(current.links.map((link) => [linkKey(link), link]));
+  for (const link of page.links) links.set(linkKey(link), link);
+  return {
+    ...current,
+    nodes: [...nodes.values()],
+    links: [...links.values()],
+    recordCount: nodes.size,
+    importedAt: page.importedAt,
+    pagination: page.pagination,
+  };
 }
