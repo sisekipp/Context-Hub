@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   Background, BackgroundVariant, Controls, Handle, MiniMap, Position, ReactFlow, addEdge,
   useEdgesState, useNodesState, type Connection, type Edge, type Node, type NodeProps,
@@ -61,6 +61,10 @@ function initialDocument(ontologyId: string, seedTemplate: boolean) {
     : { nodes: [] as OntologyNode[], edges: [] as OntologyEdge[] };
 }
 
+const subscribeToHydration = () => () => undefined;
+const getClientHydrationSnapshot = () => true;
+const getServerHydrationSnapshot = () => false;
+
 const kindMeta: Record<NodeKind, { label: string; icon: typeof Braces }> = {
   object: { label: "Object type", icon: Braces }, interface: { label: "Interface", icon: GitFork },
   value_type: { label: "Value type", icon: CircleDot }, struct: { label: "Struct", icon: Component },
@@ -75,7 +79,14 @@ function OntologyCard({ data, selected }: NodeProps<OntologyNode>) {
   </div>;
 }
 
-export function OntologyEditor({ ontologyId, ontologyName, seedTemplate, onRename, onCatalogChange }: { ontologyId: string; ontologyName: string; seedTemplate: boolean; onRename: (name: string) => void; onCatalogChange?: (catalog: OntologyCatalog) => void }) {
+type OntologyEditorProps = { ontologyId: string; ontologyName: string; seedTemplate: boolean; onRename: (name: string) => void; onCatalogChange?: (catalog: OntologyCatalog) => void };
+
+export function OntologyEditor(props: OntologyEditorProps) {
+  const hydrated = useSyncExternalStore(subscribeToHydration, getClientHydrationSnapshot, getServerHydrationSnapshot);
+  return hydrated ? <HydratedOntologyEditor {...props}/> : <div className="workspace-view" aria-label="Loading ontology editor"/>;
+}
+
+function HydratedOntologyEditor({ ontologyId, ontologyName, seedTemplate, onRename, onCatalogChange }: OntologyEditorProps) {
   const document = useMemo(() => initialDocument(ontologyId, seedTemplate), [ontologyId, seedTemplate]);
   const [nodes, setNodes, onNodesChange] = useNodesState<OntologyNode>(document.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<OntologyEdge>(document.edges);

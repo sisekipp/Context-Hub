@@ -108,6 +108,26 @@ message ListDataSourcesRequest { string workspace_id = 1; }
 message ListDataSourcesResponse { repeated DataSource data_sources = 1; }
 message SaveDataSourceRequest { DataSource data_source = 1; }
 
+enum SourceFileFormat {
+  SOURCE_FILE_FORMAT_UNSPECIFIED = 0;
+  SOURCE_FILE_FORMAT_JSON = 1;
+  SOURCE_FILE_FORMAT_NDJSON = 2;
+  SOURCE_FILE_FORMAT_CSV = 3;
+}
+message UploadDataSourceRequest {
+  string workspace_id = 1;
+  string name = 2;
+  string file_name = 3;
+  SourceFileFormat format = 4;
+  bytes content = 5;
+}
+message UploadDataSourceResponse {
+  DataSource data_source = 1;
+  string object_key = 2;
+  uint64 size_bytes = 3;
+  string sha256 = 4;
+}
+
 message OntologyDataMapping {
   string id = 1;
   string workspace_id = 2;
@@ -126,6 +146,7 @@ message ListOntologyDataMappingsResponse { repeated OntologyDataMapping mappings
 
 service DataSourceService {
   rpc Save(SaveDataSourceRequest) returns (DataSource);
+  rpc Upload(UploadDataSourceRequest) returns (UploadDataSourceResponse);
   rpc List(ListDataSourcesRequest) returns (ListDataSourcesResponse);
   rpc SaveMapping(SaveOntologyDataMappingRequest) returns (OntologyDataMapping);
   rpc ListMappings(ListOntologyDataMappingsRequest) returns (ListOntologyDataMappingsResponse);

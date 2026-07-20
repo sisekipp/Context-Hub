@@ -12,7 +12,7 @@
 8. `GraphService` validates a typed query against the active ontology and compiles a parameterized, workspace-scoped ClickHouse query.
 9. The UI and read-only MCP surface receive only bounded graph results.
 
-The current UI vertical slice also offers an immediate local file path: JSON, NDJSON, and CSV records are parsed in the browser, mapped into the selected ontology's graph model, and handed to its 2D/3D explorer. Editor drafts, mapping drafts, and in-memory explorer graphs are isolated by ontology ID.
+The UI uploads JSON, NDJSON, and CSV sources through gRPC-Web into the workspace's MinIO bucket. It also parses the same file locally for an immediate mapping preview and hands the preview graph to the selected ontology's 2D/3D explorer. Editor drafts, mapping drafts, and in-memory preview graphs are isolated by ontology ID.
 
 ## Multi-ontology ownership
 
@@ -22,11 +22,13 @@ Published graph data is scoped by both `workspace_id` and `ontology_version_id`.
 
 `IngestionService.ImportGraph` is the bounded worker-to-storage boundary. It accepts at most 5,000 mapped nodes and 20,000 mapped edges per request, verifies that source, mapping, ontology, workspace, and immutable ontology version belong together, validates every object/link type against that version, and then writes JSONEachRow batches to ClickHouse. Repeated stable IDs are handled by the versioned `ReplacingMergeTree` tables.
 
+`IngestionService.Start` runs the current asynchronous worker path. It verifies the immutable ontology version and the source/mapping ownership, reads and checksum-validates the MinIO object, converts JSON, NDJSON, or CSV input to Arrow batches, executes the restricted DataFusion mapping plan, validates the resulting types, and writes bounded node and edge batches through the same graph repository. Job state and counters are updated in memory. Browser uploads are unary and capped at 32 MiB until a multipart upload contract is introduced.
+
 ## Storage
 
 ClickHouse is the unified control and data plane. Revisioned `ReplacingMergeTree` tables store workspaces, drafts, versions, workspace-level data-source definitions, ontology-specific mapping plans, credential envelopes, and ingestion jobs. The same database stores versioned nodes, edges, typed property indices, and ingestion events. Graph sort keys begin with `workspace_id` and `ontology_version_id`. API callers never receive raw SQL access.
 
-Uploads are addressed through Apache Arrow's `object_store` abstraction. MinIO is only the local S3-compatible implementation.
+Uploads are addressed through Apache Arrow's `object_store` abstraction. MinIO is only the local S3-compatible implementation; production can use another supported object-store backend without changing mapping execution.
 
 ## Security invariants
 
@@ -40,4 +42,4 @@ Uploads are addressed through Apache Arrow's `object_store` abstraction. MinIO i
 
 ## Remaining production integrations
 
-The gRPC runtime now uses `ClickHouseGraphRepository` for graph writes and reads. Before production deployment, connect ontology, data-source, mapping, and job metadata to their ClickHouse repositories, implement MinIO-backed upload and the ingestion worker's DataFusion job loop, add credential-envelope encryption, cursor pagination, typed property-index writes, and the configured production JWT validator.
+The gRPC runtime uses `ClickHouseGraphRepository` for graph writes and reads, and MinIO plus DataFusion for uploaded-file ingestion. Before production deployment, connect ontology, data-source, mapping, and job metadata to their ClickHouse repositories; wire the frontend publish/save/start sequence; make workers durable and restartable; add multipart upload, credential-envelope encryption, cursor pagination, typed property-index writes, REST/GraphQL connector hardening, and the configured production JWT validator.

@@ -10,8 +10,8 @@ use context_hub_api::context_hub::v1::{
     ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology, OntologyDataMapping,
     OntologyDraft, OntologyVersion, PublishOntologyRequest, QueryGraphResponse,
     SaveDataSourceRequest, SaveOntologyDataMappingRequest, SaveOntologyDraftRequest,
-    StartIngestionRequest, ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue,
-    Workspace,
+    StartIngestionRequest, UploadDataSourceRequest, UploadDataSourceResponse,
+    ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue, Workspace,
     data_source_service_server::{DataSourceService, DataSourceServiceServer},
     graph_service_server::{GraphService, GraphServiceServer},
     ingestion_service_server::{IngestionService, IngestionServiceServer},
@@ -21,17 +21,21 @@ use context_hub_api::context_hub::v1::{
 use context_hub_domain::{
     ObjectTypeDefinition, OntologyDefinition, PropertyDefinition, ScalarType, ValueType,
 };
-#[cfg(test)]
-use context_hub_storage::MemoryGraphRepository;
+use context_hub_mapping::{MappingPlan, SourceFormat, execute_source_mapping};
 use context_hub_storage::{
     ClickHouseGraphRepository, FilterOperator as StorageFilterOperator, GraphEdgeWrite,
     GraphFilter as StorageGraphFilter, GraphNodeWrite, GraphQuery as StorageGraphQuery,
-    GraphRepository, StorageError, TraversalStep as StorageTraversalStep,
+    GraphRepository, ObjectStoreSourceRepository, SourceObjectStore, StorageError,
+    TraversalStep as StorageTraversalStep,
 };
+#[cfg(test)]
+use context_hub_storage::{MemoryGraphRepository, MemorySourceObjectStore};
 use prost_types::Timestamp;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status, transport::Server};
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -44,15 +48,32 @@ struct Runtime {
     mappings: Arc<RwLock<HashMap<String, OntologyDataMapping>>>,
     jobs: Arc<RwLock<HashMap<String, IngestionJob>>>,
     graph: Arc<dyn GraphRepository>,
+    source_store: Arc<dyn SourceObjectStore>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UploadSourceConfiguration {
+    object_key: String,
+    file_name: String,
+    format: SourceFormat,
+    size_bytes: u64,
+    sha256: String,
 }
 
 impl Runtime {
     #[cfg(test)]
     async fn seeded() -> Self {
-        Self::seeded_with_graph(Arc::new(MemoryGraphRepository::default())).await
+        Self::seeded_with_stores(
+            Arc::new(MemoryGraphRepository::default()),
+            Arc::new(MemorySourceObjectStore::default()),
+        )
+        .await
     }
 
-    async fn seeded_with_graph(graph: Arc<dyn GraphRepository>) -> Self {
+    async fn seeded_with_stores(
+        graph: Arc<dyn GraphRepository>,
+        source_store: Arc<dyn SourceObjectStore>,
+    ) -> Self {
         let runtime = Self {
             ontologies: Arc::default(),
             drafts: Arc::default(),
@@ -61,6 +82,7 @@ impl Runtime {
             mappings: Arc::default(),
             jobs: Arc::default(),
             graph,
+            source_store,
         };
         let ontology_id =
             Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
@@ -193,6 +215,135 @@ impl Runtime {
                     .cloned()
             })
             .ok_or_else(|| Status::not_found("ontology version not found"))
+    }
+
+    async fn run_ingestion_job(
+        &self,
+        job_id: String,
+        source: DataSource,
+        mapping: OntologyDataMapping,
+        version: OntologyVersion,
+    ) {
+        if let Some(job) = self.jobs.write().await.get_mut(&job_id) {
+            job.state = IngestionState::Running as i32;
+        }
+        let result = self
+            .ingest_uploaded_source(&source, &mapping, &version)
+            .await;
+        let mut jobs = self.jobs.write().await;
+        let Some(job) = jobs.get_mut(&job_id) else {
+            return;
+        };
+        match result {
+            Ok(mapped) => {
+                job.state = IngestionState::Succeeded as i32;
+                job.rows_read = mapped.rows_read;
+                job.rows_rejected = mapped.rows_rejected;
+                job.nodes_written = mapped.nodes.len() as u64;
+                job.edges_written = mapped.edges.len() as u64;
+            }
+            Err(error) => {
+                job.state = IngestionState::Failed as i32;
+                job.error = error;
+            }
+        }
+    }
+
+    async fn ingest_uploaded_source(
+        &self,
+        source: &DataSource,
+        mapping: &OntologyDataMapping,
+        version: &OntologyVersion,
+    ) -> Result<context_hub_mapping::MappedGraphBatch, String> {
+        let configuration: UploadSourceConfiguration =
+            serde_json::from_str(&source.configuration_json)
+                .map_err(|error| format!("source is not an uploaded object: {error}"))?;
+        let content = self
+            .source_store
+            .get(&configuration.object_key)
+            .await
+            .map_err(|error| error.to_string())?;
+        if content.len() as u64 != configuration.size_bytes {
+            return Err("uploaded object size no longer matches its source definition".into());
+        }
+        let checksum =
+            Sha256::digest(&content)
+                .iter()
+                .fold(String::with_capacity(64), |mut output, byte| {
+                    write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+                    output
+                });
+        if checksum != configuration.sha256 {
+            return Err("uploaded object checksum mismatch".into());
+        }
+        let plan: MappingPlan = serde_json::from_str(&mapping.mapping_plan_json)
+            .map_err(|error| format!("mapping plan is invalid: {error}"))?;
+        let definition: OntologyDefinition = serde_json::from_str(&version.definition_json)
+            .map_err(|error| format!("stored ontology version is invalid: {error}"))?;
+        validate_worker_plan(&plan, &definition)?;
+        let mapped = execute_source_mapping(&plan, configuration.format, &content)
+            .await
+            .map_err(|error| error.to_string())?;
+        let workspace_id = Uuid::parse_str(&source.workspace_id)
+            .map_err(|error| format!("workspace id is invalid: {error}"))?;
+        let ontology_version_id = Uuid::parse_str(&version.id)
+            .map_err(|error| format!("ontology version id is invalid: {error}"))?;
+        let data_source_id = Uuid::parse_str(&source.id)
+            .map_err(|error| format!("data source id is invalid: {error}"))?;
+        let write_version = u64::try_from(Utc::now().timestamp_micros())
+            .map_err(|_| "system clock predates the Unix epoch".to_owned())?;
+        let nodes = mapped
+            .nodes
+            .iter()
+            .map(|node| GraphNodeWrite {
+                workspace_id,
+                ontology_version_id,
+                object_type: node.object_type.clone(),
+                object_id: node.object_id.clone(),
+                source_id: data_source_id,
+                external_id: node.object_id.clone(),
+                properties_json: node.properties_json.clone(),
+                version: write_version,
+            })
+            .collect::<Vec<_>>();
+        let edges = mapped
+            .edges
+            .iter()
+            .map(|edge| GraphEdgeWrite {
+                workspace_id,
+                ontology_version_id,
+                link_type: edge.link_type.clone(),
+                edge_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!(
+                        "{}/{}/{}/{}/{}",
+                        version.id, edge.link_type, edge.source_id, edge.target_id, source.id
+                    )
+                    .as_bytes(),
+                )
+                .to_string(),
+                source_type: plan.object_type.clone(),
+                source_id: edge.source_id.clone(),
+                target_type: edge.target_object_type.clone(),
+                target_id: edge.target_id.clone(),
+                data_source_id,
+                properties_json: edge.properties_json.clone(),
+                version: write_version,
+            })
+            .collect::<Vec<_>>();
+        for chunk in nodes.chunks(5_000) {
+            self.graph
+                .write_graph(chunk, &[])
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        for chunk in edges.chunks(20_000) {
+            self.graph
+                .write_graph(&[], chunk)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(mapped)
     }
 }
 
@@ -453,6 +604,74 @@ impl DataSourceService for Runtime {
             .insert(source.id.clone(), source.clone());
         Ok(Response::new(source))
     }
+
+    async fn upload(
+        &self,
+        request: Request<UploadDataSourceRequest>,
+    ) -> Result<Response<UploadDataSourceResponse>, Status> {
+        const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
+        let request = request.into_inner();
+        if request.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if request.name.trim().is_empty() || request.file_name.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "source name and file name are required",
+            ));
+        }
+        if request.content.is_empty() || request.content.len() > MAX_UPLOAD_BYTES {
+            return Err(Status::resource_exhausted(
+                "upload must contain between 1 byte and 32 MiB",
+            ));
+        }
+        let format = source_format(request.format)?;
+        let id = Uuid::new_v4().to_string();
+        let object_key = format!(
+            "workspaces/{}/sources/{}/{}",
+            request.workspace_id,
+            id,
+            safe_file_name(&request.file_name)
+        );
+        let checksum = Sha256::digest(&request.content).iter().fold(
+            String::with_capacity(64),
+            |mut output, byte| {
+                write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+                output
+            },
+        );
+        let size_bytes = u64::try_from(request.content.len())
+            .expect("the upload limit is substantially smaller than u64::MAX");
+        self.source_store
+            .put(&object_key, request.content)
+            .await
+            .map_err(storage_status)?;
+        let configuration = UploadSourceConfiguration {
+            object_key: object_key.clone(),
+            file_name: request.file_name,
+            format,
+            size_bytes,
+            sha256: checksum.clone(),
+        };
+        let source = DataSource {
+            id,
+            workspace_id: request.workspace_id,
+            name: request.name,
+            kind: 1,
+            configuration_json: serde_json::to_string(&configuration)
+                .map_err(|error| Status::internal(error.to_string()))?,
+        };
+        self.data_sources
+            .write()
+            .await
+            .insert(source.id.clone(), source.clone());
+        Ok(Response::new(UploadDataSourceResponse {
+            data_source: Some(source),
+            object_key,
+            size_bytes,
+            sha256: checksum,
+        }))
+    }
+
     async fn list(
         &self,
         request: Request<ListDataSourcesRequest>,
@@ -536,7 +755,7 @@ impl IngestionService for Runtime {
         request: Request<StartIngestionRequest>,
     ) -> Result<Response<IngestionJob>, Status> {
         let request = request.into_inner();
-        let (source, _, _) = self
+        let (source, mapping, version) = self
             .ingestion_scope(
                 &request.data_source_id,
                 &request.ontology_mapping_id,
@@ -554,9 +773,16 @@ impl IngestionService for Runtime {
             error: String::new(),
             ontology_mapping_id: request.ontology_mapping_id,
             ontology_version_id: request.ontology_version_id,
-            workspace_id: source.workspace_id,
+            workspace_id: source.workspace_id.clone(),
         };
         self.jobs.write().await.insert(job.id.clone(), job.clone());
+        let runtime = self.clone();
+        let job_id = job.id.clone();
+        tokio::spawn(async move {
+            runtime
+                .run_ingestion_job(job_id, source, mapping, version)
+                .await;
+        });
         Ok(Response::new(job))
     }
 
@@ -808,6 +1034,52 @@ fn validate_graph_node(node: &GraphNode, definition: &OntologyDefinition) -> Res
     validate_properties_json(&node.properties_json)
 }
 
+fn validate_worker_plan(plan: &MappingPlan, definition: &OntologyDefinition) -> Result<(), String> {
+    let object_type = definition
+        .object_types
+        .iter()
+        .find(|object_type| object_type.api_name == plan.object_type)
+        .ok_or_else(|| {
+            format!(
+                "mapping object type '{}' does not exist in the ontology version",
+                plan.object_type
+            )
+        })?;
+    for field in &plan.fields {
+        if !object_type
+            .properties
+            .iter()
+            .any(|property| property.api_name == field.target)
+        {
+            return Err(format!(
+                "mapping target '{}.{}' does not exist in the ontology version",
+                plan.object_type, field.target
+            ));
+        }
+    }
+    for link in &plan.links {
+        let definition = definition
+            .link_types
+            .iter()
+            .find(|candidate| candidate.api_name == link.link_type)
+            .ok_or_else(|| {
+                format!(
+                    "mapping link type '{}' does not exist in the ontology version",
+                    link.link_type
+                )
+            })?;
+        if definition.source_type != plan.object_type
+            || definition.target_type != link.target_object_type
+        {
+            return Err(format!(
+                "mapping link '{}' does not connect '{}' to '{}'",
+                link.link_type, plan.object_type, link.target_object_type
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_graph_edge<'a>(
     edge: &GraphEdge,
     definition: &'a OntologyDefinition,
@@ -952,6 +1224,39 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid, Status> {
         .map_err(|error| Status::invalid_argument(format!("invalid {field}: {error}")))
 }
 
+fn source_format(value: i32) -> Result<SourceFormat, Status> {
+    match value {
+        1 => Ok(SourceFormat::Json),
+        2 => Ok(SourceFormat::Ndjson),
+        3 => Ok(SourceFormat::Csv),
+        _ => Err(Status::invalid_argument(
+            "source file format must be JSON, NDJSON, or CSV",
+        )),
+    }
+}
+
+fn safe_file_name(value: &str) -> String {
+    let value = value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("upload")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(128)
+        .collect::<String>();
+    if value.is_empty() {
+        "upload".into()
+    } else {
+        value
+    }
+}
+
 fn storage_status(error: StorageError) -> Status {
     match error {
         StorageError::NotFound => Status::not_found("graph object not found"),
@@ -1020,16 +1325,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_setting("input_format_binary_read_json_as_string", "1")
         .with_setting("output_format_binary_write_json_as_string", "1");
-    let runtime =
-        Runtime::seeded_with_graph(Arc::new(ClickHouseGraphRepository::new(clickhouse))).await;
+    let source_store = ObjectStoreSourceRepository::s3(
+        &std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9002".into()),
+        &std::env::var("S3_BUCKET").unwrap_or_else(|_| "context-hub".into()),
+        &std::env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "context_hub".into()),
+        &std::env::var("S3_SECRET_KEY").unwrap_or_else(|_| "context_hub_dev_secret".into()),
+    )?;
+    let runtime = Runtime::seeded_with_stores(
+        Arc::new(ClickHouseGraphRepository::new(clickhouse)),
+        Arc::new(source_store),
+    )
+    .await;
     tracing::info!(%address, "starting ContextHub gRPC and gRPC-Web server");
     Server::builder()
         .accept_http1(true)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+                .expose_headers(Any),
+        )
         .layer(tonic_web::GrpcWebLayer::new())
         .add_service(WorkspaceServiceServer::new(runtime.clone()))
         .add_service(OntologyServiceServer::new(runtime.clone()))
-        .add_service(DataSourceServiceServer::new(runtime.clone()))
-        .add_service(IngestionServiceServer::new(runtime.clone()))
+        .add_service(
+            DataSourceServiceServer::new(runtime.clone())
+                .max_decoding_message_size(34 * 1024 * 1024),
+        )
+        .add_service(
+            IngestionServiceServer::new(runtime.clone())
+                .max_decoding_message_size(64 * 1024 * 1024),
+        )
         .add_service(GraphServiceServer::new(runtime))
         .serve(address)
         .await?;
@@ -1208,5 +1535,137 @@ mod tests {
             .expect("imported object can be fetched")
             .into_inner();
         assert!(object.properties_json.contains("Billing"));
+    }
+
+    #[tokio::test]
+    async fn uploaded_json_runs_through_datafusion_into_the_graph() {
+        assert_uploaded_json_pipeline(Runtime::seeded().await).await;
+    }
+
+    #[tokio::test]
+    async fn minio_datafusion_clickhouse_pipeline() {
+        if std::env::var("CONTEXT_HUB_PIPELINE_TEST").as_deref() != Ok("1") {
+            return;
+        }
+        let clickhouse = clickhouse::Client::default()
+            .with_url(
+                std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".into()),
+            )
+            .with_database("context_hub")
+            .with_user("context_hub")
+            .with_password("context_hub")
+            .with_setting("input_format_binary_read_json_as_string", "1")
+            .with_setting("output_format_binary_write_json_as_string", "1");
+        let source_store = ObjectStoreSourceRepository::s3(
+            &std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9002".into()),
+            &std::env::var("S3_BUCKET").unwrap_or_else(|_| "context-hub".into()),
+            &std::env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "context_hub".into()),
+            &std::env::var("S3_SECRET_KEY").unwrap_or_else(|_| "context_hub_dev_secret".into()),
+        )
+        .expect("MinIO can be configured");
+        let runtime = Runtime::seeded_with_stores(
+            Arc::new(ClickHouseGraphRepository::new(clickhouse)),
+            Arc::new(source_store),
+        )
+        .await;
+        assert_uploaded_json_pipeline(runtime).await;
+    }
+
+    async fn assert_uploaded_json_pipeline(runtime: Runtime) {
+        let ontology_id =
+            Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
+        let version = runtime
+            .publish(Request::new(PublishOntologyRequest {
+                ontology_id: ontology_id.clone(),
+                expected_revision: 0,
+            }))
+            .await
+            .expect("seed ontology can be published")
+            .into_inner();
+        let upload = runtime
+            .upload(Request::new(UploadDataSourceRequest {
+                workspace_id: dev_workspace_id(),
+                name: "Service export".into(),
+                file_name: "services.json".into(),
+                format: 1,
+                content: br#"[{"service_id":"billing"}]"#.to_vec(),
+            }))
+            .await
+            .expect("JSON source can be uploaded")
+            .into_inner();
+        let source = upload.data_source.expect("upload returns a data source");
+        let plan = MappingPlan {
+            id: Uuid::new_v4(),
+            object_type: "service".into(),
+            identity_fields: vec!["service_id".into()],
+            fields: vec![context_hub_mapping::FieldMapping {
+                source: "service_id".into(),
+                target: "id".into(),
+                transforms: vec![],
+                on_error: context_hub_mapping::ErrorStrategy::RejectRow,
+            }],
+            links: vec![],
+            row_filter: None,
+        };
+        let mapping = runtime
+            .save_mapping(Request::new(SaveOntologyDataMappingRequest {
+                mapping: Some(OntologyDataMapping {
+                    id: String::new(),
+                    workspace_id: dev_workspace_id(),
+                    ontology_id,
+                    data_source_id: source.id.clone(),
+                    name: "Service mapping".into(),
+                    mapping_plan_json: serde_json::to_string(&plan).unwrap(),
+                    revision: 0,
+                }),
+            }))
+            .await
+            .expect("mapping can be saved")
+            .into_inner();
+        let queued = runtime
+            .start(Request::new(StartIngestionRequest {
+                data_source_id: source.id,
+                ontology_mapping_id: mapping.id,
+                ontology_version_id: version.id.clone(),
+            }))
+            .await
+            .expect("ingestion can be queued")
+            .into_inner();
+
+        let mut completed = queued;
+        for _ in 0..500 {
+            completed = runtime
+                .get_job(Request::new(GetIngestionJobRequest {
+                    id: completed.id.clone(),
+                }))
+                .await
+                .expect("job can be polled")
+                .into_inner();
+            if completed.state == IngestionState::Succeeded as i32
+                || completed.state == IngestionState::Failed as i32
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(completed.state, IngestionState::Succeeded as i32);
+        assert_eq!(completed.nodes_written, 1);
+
+        let graph = runtime
+            .query(Request::new(GraphQuery {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version.id,
+                root_type: "service".into(),
+                filters: vec![],
+                traversal: vec![],
+                projection: vec![],
+                limit: 10,
+                cursor: String::new(),
+            }))
+            .await
+            .expect("worker output can be queried")
+            .into_inner();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].id, "service:billing");
     }
 }

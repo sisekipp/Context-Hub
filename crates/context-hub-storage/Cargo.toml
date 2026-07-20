@@ -10,6 +10,7 @@ async-trait.workspace = true
 chrono.workspace = true
 clickhouse.workspace = true
 context-hub-domain = { path = "../context-hub-domain" }
+object_store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

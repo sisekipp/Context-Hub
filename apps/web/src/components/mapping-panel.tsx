@@ -4,6 +4,7 @@ import { ChangeEvent, useMemo, useState } from "react";
 import { ArrowRight, CheckCircle2, FileJson2, GitBranch, Play, Plus, Save, Trash2, Upload } from "lucide-react";
 import type { GraphValue, ImportedGraph } from "@/lib/graph-data";
 import type { OntologyCatalog, OntologyObjectType } from "@/lib/ontology-catalog";
+import { uploadWorkspaceSource } from "@/lib/context-hub-client";
 
 export type SourceRecord = Record<string, GraphValue>;
 export type BrowserDataSource = { id: string; fileName: string; records: SourceRecord[] };
@@ -206,7 +207,9 @@ export function MappingPanel({ ontologyId, ontology, dataSource, onDataSourceLoa
     try {
       const parsed = parseSource(file.name, await file.text());
       if (!parsed.length) throw new Error("No object records found");
-      onDataSourceLoaded({ id: crypto.randomUUID(), fileName: file.name, records: parsed });
+      const uploaded = await uploadWorkspaceSource(file);
+      onDataSourceLoaded({ id: uploaded.id, fileName: file.name, records: parsed });
+      setMessage(`${parsed.length.toLocaleString("de-DE")} records loaded and stored in MinIO.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "The file could not be parsed.");
     }

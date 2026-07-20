@@ -7,6 +7,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use context_hub_domain::OntologyDraft;
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, sync::RwLock};
@@ -160,6 +161,8 @@ pub enum StorageError {
     ClickHouse(#[from] clickhouse::error::Error),
     #[error("I/O error while writing to the store: {0}")]
     Io(#[from] std::io::Error),
+    #[error("object store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("stored record is invalid: {0}")]
@@ -178,6 +181,89 @@ pub trait OntologyRepository: Send + Sync {
         draft: &OntologyDraft,
         expected_revision: u64,
     ) -> Result<(), StorageError>;
+}
+
+#[async_trait]
+pub trait SourceObjectStore: Send + Sync {
+    async fn put(&self, key: &str, content: Vec<u8>) -> Result<(), StorageError>;
+    async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError>;
+}
+
+#[derive(Clone)]
+pub struct ObjectStoreSourceRepository {
+    store: Arc<dyn ObjectStore>,
+}
+
+impl ObjectStoreSourceRepository {
+    pub fn new(store: Arc<dyn ObjectStore>) -> Self {
+        Self { store }
+    }
+
+    /// Creates an S3-compatible source repository. The bucket must already exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an object-store configuration error when endpoint, bucket, or credentials are
+    /// invalid.
+    pub fn s3(
+        endpoint: &str,
+        bucket: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<Self, StorageError> {
+        let store = object_store::aws::AmazonS3Builder::new()
+            .with_endpoint(endpoint)
+            .with_region("us-east-1")
+            .with_bucket_name(bucket)
+            .with_access_key_id(access_key)
+            .with_secret_access_key(secret_key)
+            .with_allow_http(endpoint.starts_with("http://"))
+            .with_virtual_hosted_style_request(false)
+            .build()?;
+        Ok(Self::new(Arc::new(store)))
+    }
+}
+
+#[async_trait]
+impl SourceObjectStore for ObjectStoreSourceRepository {
+    async fn put(&self, key: &str, content: Vec<u8>) -> Result<(), StorageError> {
+        self.store
+            .put(&Path::from(key), PutPayload::from(content))
+            .await?;
+        Ok(())
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        Ok(self
+            .store
+            .get(&Path::from(key))
+            .await?
+            .bytes()
+            .await?
+            .to_vec())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MemorySourceObjectStore {
+    objects: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+}
+
+#[async_trait]
+impl SourceObjectStore for MemorySourceObjectStore {
+    async fn put(&self, key: &str, content: Vec<u8>) -> Result<(), StorageError> {
+        self.objects.write().await.insert(key.to_owned(), content);
+        Ok(())
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        self.objects
+            .read()
+            .await
+            .get(key)
+            .cloned()
+            .ok_or(StorageError::NotFound)
+    }
 }
 
 #[derive(Clone)]
@@ -882,5 +968,29 @@ mod tests {
             .await
             .expect("edges can be queried from ClickHouse");
         assert_eq!(edges.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn minio_source_round_trip() {
+        if std::env::var("CONTEXT_HUB_MINIO_TEST").as_deref() != Ok("1") {
+            return;
+        }
+        let repository = ObjectStoreSourceRepository::s3(
+            &std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9002".into()),
+            &std::env::var("S3_BUCKET").unwrap_or_else(|_| "context-hub".into()),
+            &std::env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "context_hub".into()),
+            &std::env::var("S3_SECRET_KEY").unwrap_or_else(|_| "context_hub_dev_secret".into()),
+        )
+        .expect("MinIO source repository can be configured");
+        let key = format!("integration-tests/{}.json", Uuid::new_v4());
+        repository
+            .put(&key, br#"[{"id":"test"}]"#.to_vec())
+            .await
+            .expect("source can be written to MinIO");
+        let content = repository
+            .get(&key)
+            .await
+            .expect("source can be read from MinIO");
+        assert_eq!(content, br#"[{"id":"test"}]"#);
     }
 }

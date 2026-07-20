@@ -8,7 +8,7 @@ ENV PNPM_HOME=/pnpm
 ENV PNPM_STORE_DIR=/pnpm/store
 ENV PATH=/pnpm:/opt/mise/shims:${PATH}
 
-RUN mkdir -p /opt/mise /pnpm/store /workspace/node_modules /workspace/apps/web/node_modules /workspace/apps/web/.next \
-    && chown -R vscode:vscode /opt/mise /pnpm /workspace/node_modules /workspace/apps/web/node_modules /workspace/apps/web/.next
+RUN mkdir -p /opt/mise /pnpm/store /usr/local/cargo/registry /workspace/node_modules /workspace/apps/web/node_modules /workspace/apps/web/.next \
+    && chown -R vscode:vscode /opt/mise /pnpm /usr/local/cargo/registry /workspace/node_modules /workspace/apps/web/node_modules /workspace/apps/web/.next
 
 WORKDIR /workspace

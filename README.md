@@ -10,6 +10,8 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - Validation for API names, identities, reusable type references, function boundaries, link targets, enums, and interface cycles.
 - Optimistic draft revisions and immutable publish versions in the gRPC service.
 - A declarative `MappingPlan` compiled into safe Apache DataFusion SQL expressions.
+- JSON, NDJSON, and CSV source uploads through gRPC-Web into MinIO, with a 32 MiB per-request development limit.
+- A background ingestion path that reads uploaded objects as Arrow batches, executes the ontology-specific mapping through DataFusion, and writes nodes and links to ClickHouse.
 - Bounded, tenant-scoped graph query compilation into parameterized ClickHouse SQL.
 - Ontology-version-scoped graph batch ingestion with stable node/edge IDs and persistent ClickHouse storage.
 - A working `GraphService` for bounded node queries, traversals, edge results, and single-object lookup.
@@ -61,6 +63,6 @@ infra/                      ClickHouse bootstrap schema
 
 Actions, scenarios, GeoPoint/GeoShape, Attachment/MediaReference, status/render metadata, write-capable MCP tools, direct database connectors, and arbitrary user SQL are deliberately excluded. Functions are included as read-only expression, external gRPC, or WASM definitions. ConnectorX is reserved for a later direct-database connector milestone.
 
-The current browser vertical slice parses JSON, NDJSON, and CSV locally and passes the resulting objects and links directly to the explorer. The backend now accepts validated, already-mapped graph batches through `IngestionService.ImportGraph` and persists them in ClickHouse. Connecting the browser upload flow to MinIO, DataFusion, and this worker boundary remains an integration step; refreshing the browser still clears a graph imported only through the local UI path.
+The browser uploads selected JSON, NDJSON, and CSV files to the backend and stores them durably in MinIO. It still also parses those files locally to provide an immediate mapping preview and in-session 2D/3D result. The backend can independently execute a saved mapping with `IngestionService.Start`: it reads the shared source from MinIO, maps it with Arrow/DataFusion, and persists the ontology-version-scoped graph in ClickHouse.
 
-Each ontology currently keeps its own local editor draft, mapping draft, and in-session explorer graph. The next integration step is persistent shared-source upload plus backend execution of the ontology-specific mapping plan.
+Ontology drafts, mapping plans, data-source metadata, and ingestion job status currently live in backend memory; editor/mapping drafts and the immediate explorer graph also remain local to the browser. Consequently, a backend restart loses control-plane metadata and the UI does not yet invoke the publish/save-mapping/start-ingestion sequence. The next integration step is to connect those control-plane services to their existing ClickHouse schema and wire that sequence into the UI. REST and GraphQL connectors, multipart uploads beyond 32 MiB, durable/restartable workers, typed property-index writes, and production authentication remain future work.

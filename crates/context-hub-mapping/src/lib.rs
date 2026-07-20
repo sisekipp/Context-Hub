@@ -1,7 +1,15 @@
-use std::sync::Arc;
+use std::{io::Cursor, sync::Arc};
 
 use datafusion::{
-    arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
+    arrow::{
+        csv::reader::{Format as CsvFormat, ReaderBuilder as CsvReaderBuilder},
+        datatypes::SchemaRef,
+        error::ArrowError,
+        json::{
+            LineDelimitedWriter, ReaderBuilder as JsonReaderBuilder, reader::infer_json_schema,
+        },
+        record_batch::RecordBatch,
+    },
     datasource::MemTable,
     prelude::SessionContext,
 };
@@ -20,6 +28,38 @@ pub struct MappingPlan {
     pub links: Vec<LinkMapping>,
     #[serde(default)]
     pub row_filter: Option<Predicate>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceFormat {
+    Json,
+    Ndjson,
+    Csv,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappedNode {
+    pub object_type: String,
+    pub object_id: String,
+    pub properties_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappedEdge {
+    pub link_type: String,
+    pub source_id: String,
+    pub target_object_type: String,
+    pub target_id: String,
+    pub properties_json: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MappedGraphBatch {
+    pub rows_read: u64,
+    pub rows_rejected: u64,
+    pub nodes: Vec<MappedNode>,
+    pub edges: Vec<MappedEdge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -129,6 +169,12 @@ pub enum MappingError {
     DuplicateTarget(String),
     #[error("mapping execution failed: {0}")]
     Execution(#[from] datafusion::error::DataFusionError),
+    #[error("Arrow source processing failed: {0}")]
+    Arrow(#[from] ArrowError),
+    #[error("source JSON is invalid: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("source must contain object records")]
+    InvalidSource,
 }
 
 impl MappingPlan {
@@ -231,6 +277,196 @@ pub async fn execute_mapping(
     context.register_table("source", Arc::new(table))?;
     let frame = context.sql(&plan.compile_datafusion_sql()?).await?;
     Ok(frame.collect().await?)
+}
+
+/// Loads a bounded source into Arrow, executes the restricted `DataFusion` mapping, and converts
+/// the result into stable property-graph records for the storage worker.
+///
+/// # Errors
+///
+/// Returns [`MappingError`] when parsing, schema inference, mapping execution, or graph identity
+/// construction fails.
+pub async fn execute_source_mapping(
+    plan: &MappingPlan,
+    format: SourceFormat,
+    content: &[u8],
+) -> Result<MappedGraphBatch, MappingError> {
+    plan.validate()?;
+    let batches = read_source_batches(format, content)?;
+    let rows_read = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    if batches.is_empty() {
+        return Ok(MappedGraphBatch::default());
+    }
+    let schema = batches[0].schema();
+    let worker_plan = worker_projection(plan);
+    let mapped = execute_mapping(&worker_plan, schema, batches).await?;
+    let rows = record_batches_to_json(&mapped)?;
+    let mut result = MappedGraphBatch {
+        rows_read: rows_read as u64,
+        ..MappedGraphBatch::default()
+    };
+    for row in rows {
+        let Some(object) = row.as_object() else {
+            result.rows_rejected += 1;
+            continue;
+        };
+        let identity = (0..plan.identity_fields.len())
+            .map(|index| object.get(&format!("__identity_{index}")))
+            .collect::<Option<Vec<_>>>();
+        let Some(identity) = identity.filter(|values| values.iter().all(|value| !value.is_null()))
+        else {
+            result.rows_rejected += 1;
+            continue;
+        };
+        let object_id = stable_object_id(&plan.object_type, &identity);
+        let properties = plan
+            .fields
+            .iter()
+            .filter_map(|field| {
+                object
+                    .get(&field.target)
+                    .cloned()
+                    .map(|value| (field.target.clone(), value))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        result.nodes.push(MappedNode {
+            object_type: plan.object_type.clone(),
+            object_id: object_id.clone(),
+            properties_json: serde_json::to_string(&properties)?,
+        });
+        for (link_index, link) in plan.links.iter().enumerate() {
+            let target_values = (0..link.source_fields.len())
+                .map(|field_index| object.get(&format!("__link_{link_index}_{field_index}")))
+                .collect::<Option<Vec<_>>>();
+            let Some(target_values) =
+                target_values.filter(|values| values.iter().all(|value| !value.is_null()))
+            else {
+                continue;
+            };
+            result.edges.push(MappedEdge {
+                link_type: link.link_type.clone(),
+                source_id: object_id.clone(),
+                target_object_type: link.target_object_type.clone(),
+                target_id: stable_object_id(&link.target_object_type, &target_values),
+                properties_json: "{}".into(),
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn worker_projection(plan: &MappingPlan) -> MappingPlan {
+    let mut worker = plan.clone();
+    for (index, source) in plan.identity_fields.iter().enumerate() {
+        let transforms = plan
+            .fields
+            .iter()
+            .find(|field| field.source == *source)
+            .map(|field| field.transforms.clone())
+            .unwrap_or_default();
+        worker.fields.push(FieldMapping {
+            source: source.clone(),
+            target: format!("__identity_{index}"),
+            transforms,
+            on_error: ErrorStrategy::RejectRow,
+        });
+    }
+    for (link_index, link) in plan.links.iter().enumerate() {
+        for (field_index, source) in link.source_fields.iter().enumerate() {
+            worker.fields.push(FieldMapping {
+                source: source.clone(),
+                target: format!("__link_{link_index}_{field_index}"),
+                transforms: vec![],
+                on_error: ErrorStrategy::RejectRow,
+            });
+        }
+    }
+    worker
+}
+
+fn read_source_batches(
+    format: SourceFormat,
+    content: &[u8],
+) -> Result<Vec<RecordBatch>, MappingError> {
+    match format {
+        SourceFormat::Json | SourceFormat::Ndjson => {
+            let data = if format == SourceFormat::Json {
+                normalize_json_records(content)?
+            } else {
+                content.to_vec()
+            };
+            let mut inference = Cursor::new(&data);
+            let (schema, _) = infer_json_schema(&mut inference, None)?;
+            let reader = JsonReaderBuilder::new(Arc::new(schema))
+                .with_batch_size(8_192)
+                .build(Cursor::new(data))?;
+            reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }
+        SourceFormat::Csv => {
+            let format = CsvFormat::default().with_header(true);
+            let mut inference = Cursor::new(content);
+            let (schema, _) = format.infer_schema(&mut inference, Some(1_000))?;
+            let reader = CsvReaderBuilder::new(Arc::new(schema))
+                .with_format(format)
+                .with_batch_size(8_192)
+                .build(Cursor::new(content))?;
+            reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }
+    }
+}
+
+fn normalize_json_records(content: &[u8]) -> Result<Vec<u8>, MappingError> {
+    let value: serde_json::Value = serde_json::from_slice(content)?;
+    let records = match value {
+        serde_json::Value::Array(records) => records,
+        serde_json::Value::Object(mut object) => ["records", "data", "items", "results"]
+            .into_iter()
+            .find_map(|key| {
+                object
+                    .remove(key)
+                    .and_then(|value| value.as_array().cloned())
+            })
+            .unwrap_or_else(|| vec![serde_json::Value::Object(object)]),
+        _ => return Err(MappingError::InvalidSource),
+    };
+    if records.iter().any(|record| !record.is_object()) {
+        return Err(MappingError::InvalidSource);
+    }
+    let mut output = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut output, &record)?;
+        output.push(b'\n');
+    }
+    Ok(output)
+}
+
+fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Vec<serde_json::Value>, MappingError> {
+    let mut output = Vec::new();
+    {
+        let mut writer = LineDelimitedWriter::new(&mut output);
+        for batch in batches {
+            writer.write(batch)?;
+        }
+        writer.finish()?;
+    }
+    output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn stable_object_id(object_type: &str, values: &[&serde_json::Value]) -> String {
+    let identity = values
+        .iter()
+        .map(|value| match value {
+            serde_json::Value::String(value) => value.clone(),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("{object_type}:{identity}")
 }
 
 fn compile_transform(input: String, transform: &Transform) -> Result<String, MappingError> {
@@ -406,5 +642,49 @@ mod tests {
             plan.validate(),
             Err(MappingError::InvalidIdentifier(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn maps_json_records_to_nodes_and_links() {
+        let plan = MappingPlan {
+            id: Uuid::nil(),
+            object_type: "service".into(),
+            identity_fields: vec!["service_id".into()],
+            fields: vec![
+                FieldMapping {
+                    source: "service_id".into(),
+                    target: "id".into(),
+                    transforms: vec![Transform::Trim],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+                FieldMapping {
+                    source: "service_name".into(),
+                    target: "name".into(),
+                    transforms: vec![Transform::Trim],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+            ],
+            links: vec![LinkMapping {
+                link_type: "owned_by".into(),
+                target_object_type: "team".into(),
+                source_fields: vec!["team_id".into()],
+                target_identity_fields: vec!["id".into()],
+            }],
+            row_filter: None,
+        };
+        let mapped = execute_source_mapping(
+            &plan,
+            SourceFormat::Json,
+            br#"[{"service_id":" billing ","service_name":" Billing API ","team_id":"payments"}]"#,
+        )
+        .await
+        .expect("JSON records can be mapped through DataFusion");
+
+        assert_eq!(mapped.rows_read, 1);
+        assert_eq!(mapped.rows_rejected, 0);
+        assert_eq!(mapped.nodes[0].object_id, "service:billing");
+        assert!(mapped.nodes[0].properties_json.contains("Billing API"));
+        assert_eq!(mapped.edges[0].source_id, "service:billing");
+        assert_eq!(mapped.edges[0].target_id, "team:payments");
     }
 }
