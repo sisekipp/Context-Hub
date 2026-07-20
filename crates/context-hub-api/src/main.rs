@@ -47,6 +47,10 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod rest_connector;
+
+use rest_connector::{RestSourceConfiguration, fetch_rest_source};
+
 #[derive(Clone)]
 struct Runtime {
     ontologies: Arc<RwLock<HashMap<String, Ontology>>>,
@@ -418,9 +422,7 @@ impl Runtime {
         {
             tracing::error!(%error, %job_id, "failed to persist running ingestion job");
         }
-        let result = self
-            .ingest_uploaded_source(&source, &mapping, &version)
-            .await;
+        let result = self.ingest_source(&source, &mapping, &version).await;
         let completed = {
             let mut jobs = self.jobs.write().await;
             let Some(job) = jobs.get_mut(&job_id) else {
@@ -489,13 +491,28 @@ impl Runtime {
         }
     }
 
-    async fn ingest_uploaded_source(
+    async fn ingest_source(
         &self,
         source: &DataSource,
         mapping: &OntologyDataMapping,
         version: &OntologyVersion,
     ) -> Result<context_hub_mapping::MappedGraphBatch, String> {
-        let (configuration, content) = self.read_uploaded_source(source).await?;
+        let (format, content) = match source.kind {
+            1 => {
+                let (configuration, content) = self.read_uploaded_source(source).await?;
+                (configuration.format, content)
+            }
+            2 => {
+                let configuration: RestSourceConfiguration =
+                    serde_json::from_str(&source.configuration_json).map_err(|error| {
+                        format!("REST source configuration is invalid: {error}")
+                    })?;
+                let content = fetch_rest_source(&configuration).await?;
+                (SourceFormat::Json, content)
+            }
+            3 => return Err("GraphQL ingestion is not implemented yet".into()),
+            _ => return Err("data source kind is not supported for ingestion".into()),
+        };
         let document: MappingDocument = serde_json::from_str(&mapping.mapping_plan_json)
             .map_err(|error| format!("mapping document is invalid: {error}"))?;
         document
@@ -506,10 +523,9 @@ impl Runtime {
         for plan in document.plans() {
             validate_worker_plan(plan, &definition)?;
         }
-        let mapped =
-            execute_source_mapping_bundle(document.plans(), configuration.format, &content)
-                .await
-                .map_err(|error| error.to_string())?;
+        let mapped = execute_source_mapping_bundle(document.plans(), format, &content)
+            .await
+            .map_err(|error| error.to_string())?;
         self.write_mapped_graph(source, version, &mapped).await?;
         Ok(mapped)
     }
@@ -883,6 +899,28 @@ impl DataSourceService for Runtime {
         }
         if source.workspace_id.is_empty() {
             source.workspace_id = dev_workspace_id();
+        }
+        if source.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if source.name.trim().is_empty() {
+            return Err(Status::invalid_argument("data source name is required"));
+        }
+        match source.kind {
+            1 | 3 => {}
+            2 => {
+                let configuration: RestSourceConfiguration =
+                    serde_json::from_str(&source.configuration_json).map_err(|error| {
+                        Status::invalid_argument(format!(
+                            "REST source configuration is invalid: {error}"
+                        ))
+                    })?;
+                configuration
+                    .validate()
+                    .await
+                    .map_err(Status::invalid_argument)?;
+            }
+            _ => return Err(Status::invalid_argument("data source kind is unsupported")),
         }
         self.persist_data_source(&source).await?;
         self.data_sources
