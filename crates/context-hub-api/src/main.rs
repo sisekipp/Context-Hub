@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt::Write as _, net::SocketAddr, sync::Arc};
 
-use chrono::Utc;
+use chrono::{DateTime, NaiveDate, Utc};
 use context_hub_api::context_hub::v1::{
     CreateOntologyRequest, DataSource, GetIngestionJobRequest, GetObjectRequest,
     GetOntologyDraftRequest, GetUploadDataSourceRequest, GetUploadDataSourceResponse,
@@ -29,9 +29,10 @@ use context_hub_storage::{
     ClickHouseControlPlaneRepository, ClickHouseGraphRepository, ControlPlaneRepository,
     ControlPlaneSnapshot, FilterOperator as StorageFilterOperator, GraphEdgeWrite,
     GraphFilter as StorageGraphFilter, GraphNodeWrite, GraphQuery as StorageGraphQuery,
-    GraphRepository, ObjectStoreSourceRepository, SourceObjectStore, StorageError,
-    StoredDataSource, StoredIngestionJob, StoredOntology, StoredOntologyDraft,
-    StoredOntologyMapping, StoredOntologyVersion, TraversalStep as StorageTraversalStep,
+    GraphRepository, ObjectStoreSourceRepository, PropertyIndexValue, PropertyIndexWrite,
+    SourceObjectStore, StorageError, StoredDataSource, StoredIngestionJob, StoredOntology,
+    StoredOntologyDraft, StoredOntologyMapping, StoredOntologyVersion,
+    TraversalStep as StorageTraversalStep,
 };
 #[cfg(test)]
 use context_hub_storage::{MemoryGraphRepository, MemorySourceObjectStore};
@@ -556,20 +557,29 @@ impl Runtime {
             .map_err(|error| format!("data source id is invalid: {error}"))?;
         let write_version = u64::try_from(Utc::now().timestamp_micros())
             .map_err(|_| "system clock predates the Unix epoch".to_owned())?;
+        let definition: OntologyDefinition = serde_json::from_str(&version.definition_json)
+            .map_err(|error| format!("stored ontology is invalid: {error}"))?;
         let nodes = mapped
             .nodes
             .iter()
-            .map(|node| GraphNodeWrite {
-                workspace_id,
-                ontology_version_id,
-                object_type: node.object_type.clone(),
-                object_id: node.object_id.clone(),
-                source_id: data_source_id,
-                external_id: node.object_id.clone(),
-                properties_json: node.properties_json.clone(),
-                version: write_version,
+            .map(|node| {
+                Ok(GraphNodeWrite {
+                    workspace_id,
+                    ontology_version_id,
+                    object_type: node.object_type.clone(),
+                    object_id: node.object_id.clone(),
+                    source_id: data_source_id,
+                    external_id: node.object_id.clone(),
+                    property_indexes: property_indexes(
+                        &node.object_type,
+                        &node.properties_json,
+                        &definition,
+                    )?,
+                    properties_json: node.properties_json.clone(),
+                    version: write_version,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         let edges = mapped
             .edges
             .iter()
@@ -1132,6 +1142,12 @@ impl IngestionService for Runtime {
                 object_id: node.id.clone(),
                 source_id: data_source_id,
                 external_id: node.id.clone(),
+                property_indexes: property_indexes(
+                    &node.object_type,
+                    &node.properties_json,
+                    &definition,
+                )
+                .map_err(Status::invalid_argument)?,
                 properties_json: node.properties_json.clone(),
                 version: write_version,
             });
@@ -1445,6 +1461,105 @@ fn validate_properties_json(value: &str) -> Result<(), Status> {
             "graph properties must be a JSON object",
         ))
     }
+}
+
+fn property_indexes(
+    object_type: &str,
+    properties_json: &str,
+    definition: &OntologyDefinition,
+) -> Result<Vec<PropertyIndexWrite>, String> {
+    let object_definition = definition
+        .object_types
+        .iter()
+        .find(|candidate| candidate.api_name == object_type)
+        .ok_or_else(|| format!("object type '{object_type}' does not exist in the ontology"))?;
+    let properties: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(properties_json)
+            .map_err(|error| format!("invalid properties JSON: {error}"))?;
+    let mut indexes = Vec::new();
+    for property in object_definition
+        .properties
+        .iter()
+        .filter(|property| property.indexed)
+    {
+        let Some(value) = properties.get(&property.api_name) else {
+            continue;
+        };
+        let values = if property.value_type.list {
+            value.as_array().ok_or_else(|| {
+                format!(
+                    "indexed property '{}.{}' must be a list",
+                    object_type, property.api_name
+                )
+            })?
+        } else {
+            std::slice::from_ref(value)
+        };
+        for value in values.iter().filter(|value| !value.is_null()) {
+            let index_value = match &property.value_type.scalar {
+                ScalarType::String | ScalarType::Uuid | ScalarType::Enum { .. } => {
+                    PropertyIndexValue::String(
+                        value
+                            .as_str()
+                            .ok_or_else(|| indexed_type_error(object_type, property))?
+                            .to_owned(),
+                    )
+                }
+                ScalarType::Int64 | ScalarType::Float64 | ScalarType::Decimal => {
+                    let number = value.as_number().map(ToString::to_string).or_else(|| {
+                        matches!(property.value_type.scalar, ScalarType::Decimal)
+                            .then(|| value.as_str().map(str::to_owned))
+                            .flatten()
+                    });
+                    PropertyIndexValue::Number(
+                        number.ok_or_else(|| indexed_type_error(object_type, property))?,
+                    )
+                }
+                ScalarType::Boolean => PropertyIndexValue::Boolean(
+                    value
+                        .as_bool()
+                        .ok_or_else(|| indexed_type_error(object_type, property))?,
+                ),
+                ScalarType::Date => {
+                    let date = NaiveDate::parse_from_str(
+                        value
+                            .as_str()
+                            .ok_or_else(|| indexed_type_error(object_type, property))?,
+                        "%Y-%m-%d",
+                    )
+                    .map_err(|_| indexed_type_error(object_type, property))?;
+                    PropertyIndexValue::Timestamp(format!("{date} 00:00:00.000000"))
+                }
+                ScalarType::Timestamp => {
+                    let timestamp = DateTime::parse_from_rfc3339(
+                        value
+                            .as_str()
+                            .ok_or_else(|| indexed_type_error(object_type, property))?,
+                    )
+                    .map_err(|_| indexed_type_error(object_type, property))?;
+                    PropertyIndexValue::Timestamp(
+                        timestamp
+                            .with_timezone(&Utc)
+                            .format("%Y-%m-%d %H:%M:%S%.6f")
+                            .to_string(),
+                    )
+                }
+                ScalarType::Json => continue,
+            };
+            indexes.push(PropertyIndexWrite {
+                property: property.api_name.clone(),
+                value: index_value,
+            });
+        }
+    }
+    Ok(indexes)
+}
+
+fn indexed_type_error(object_type: &str, property: &PropertyDefinition) -> String {
+    format!(
+        "indexed property '{}.{}' does not match its ontology type",
+        object_type, property.api_name
+    )
 }
 
 fn validate_graph_query(query: &GraphQuery, definition: &OntologyDefinition) -> Result<(), Status> {
@@ -1930,6 +2045,60 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn derives_typed_property_indexes_from_the_ontology() {
+        let runtime = Runtime::seeded().await;
+        let draft = runtime
+            .drafts
+            .read()
+            .await
+            .values()
+            .next()
+            .cloned()
+            .expect("seed draft exists");
+        let mut definition: OntologyDefinition =
+            serde_json::from_str(&draft.definition_json).expect("seed definition is valid");
+        let properties = &mut definition.object_types[0].properties;
+        for (api_name, scalar, list) in [
+            ("score", ScalarType::Float64, false),
+            ("enabled", ScalarType::Boolean, false),
+            ("observed_at", ScalarType::Timestamp, false),
+            ("tags", ScalarType::String, true),
+        ] {
+            properties.push(PropertyDefinition {
+                api_name: api_name.into(),
+                display_name: api_name.into(),
+                value_type: ValueType { scalar, list },
+                required: false,
+                unique: false,
+                identity: false,
+                indexed: true,
+                description: None,
+            });
+        }
+
+        let indexes = property_indexes(
+            "service",
+            r#"{"id":"billing","score":4.5,"enabled":true,"observed_at":"2026-07-21T10:11:12Z","tags":["critical","public"]}"#,
+            &definition,
+        )
+        .expect("typed indexes can be derived");
+
+        assert_eq!(indexes.len(), 6);
+        assert!(indexes.contains(&PropertyIndexWrite {
+            property: "score".into(),
+            value: PropertyIndexValue::Number("4.5".into()),
+        }));
+        assert!(indexes.contains(&PropertyIndexWrite {
+            property: "enabled".into(),
+            value: PropertyIndexValue::Boolean(true),
+        }));
+        assert!(indexes.contains(&PropertyIndexWrite {
+            property: "tags".into(),
+            value: PropertyIndexValue::String("critical".into()),
+        }));
+    }
+
+    #[tokio::test]
     async fn shared_source_keeps_mappings_isolated_by_ontology() {
         let runtime = Runtime::seeded().await;
         let first = runtime
@@ -2222,6 +2391,16 @@ mod tests {
         .expect("persistent runtime can be seeded");
         let (source_id, mapping_id, version_id, job_id) =
             assert_uploaded_json_pipeline(&runtime).await;
+        let indexed = clickhouse
+            .query(
+                "SELECT count() FROM property_string_index FINAL WHERE workspace_id = ? AND ontology_version_id = ? AND object_type = 'service' AND property = 'id' AND value = 'billing' AND object_id = 'service:billing' AND deleted = false",
+            )
+            .bind(dev_workspace_id())
+            .bind(version_id.clone())
+            .fetch_one::<u64>()
+            .await
+            .expect("indexed property can be read from ClickHouse");
+        assert_eq!(indexed, 1);
         let interrupted = IngestionJob {
             id: Uuid::new_v4().to_string(),
             data_source_id: source_id.clone(),

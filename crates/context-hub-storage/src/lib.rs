@@ -656,7 +656,24 @@ pub struct GraphNodeWrite {
     pub source_id: Uuid,
     pub external_id: String,
     pub properties_json: String,
+    #[serde(default)]
+    pub property_indexes: Vec<PropertyIndexWrite>,
     pub version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PropertyIndexWrite {
+    pub property: String,
+    pub value: PropertyIndexValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum PropertyIndexValue {
+    String(String),
+    Number(String),
+    Boolean(bool),
+    Timestamp(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -745,6 +762,54 @@ impl ClickHouseGraphRepository {
             .buffered();
         insert.write_all(body.as_bytes()).await?;
         insert.end().await?;
+        self.insert_property_indexes(nodes).await?;
+        Ok(())
+    }
+
+    async fn insert_property_indexes(&self, nodes: &[GraphNodeWrite]) -> Result<(), StorageError> {
+        for (table, kind) in [
+            ("property_string_index", "string"),
+            ("property_number_index", "number"),
+            ("property_boolean_index", "boolean"),
+            ("property_timestamp_index", "timestamp"),
+        ] {
+            let mut body = String::new();
+            for node in nodes {
+                for index in &node.property_indexes {
+                    let value = match (&index.value, kind) {
+                        (PropertyIndexValue::String(value), "string")
+                        | (PropertyIndexValue::Number(value), "number")
+                        | (PropertyIndexValue::Timestamp(value), "timestamp") => {
+                            serde_json::Value::String(value.clone())
+                        }
+                        (PropertyIndexValue::Boolean(value), "boolean") => {
+                            serde_json::Value::Bool(*value)
+                        }
+                        _ => continue,
+                    };
+                    body.push_str(&serde_json::to_string(&serde_json::json!({
+                        "workspace_id": node.workspace_id,
+                        "ontology_version_id": node.ontology_version_id,
+                        "object_type": node.object_type,
+                        "property": index.property,
+                        "value": value,
+                        "object_id": node.object_id,
+                        "version": node.version,
+                        "deleted": false
+                    }))?);
+                    body.push('\n');
+                }
+            }
+            if body.is_empty() {
+                continue;
+            }
+            let statement = format!(
+                "INSERT INTO {table} (workspace_id, ontology_version_id, object_type, property, value, object_id, version, deleted) FORMAT JSONEachRow"
+            );
+            let mut insert = self.client.insert_formatted_with(&statement).buffered();
+            insert.write_all(body.as_bytes()).await?;
+            insert.end().await?;
+        }
         Ok(())
     }
 
@@ -1200,6 +1265,7 @@ mod tests {
                         source_id,
                         external_id: "test".into(),
                         properties_json: r#"{"name":"Test"}"#.into(),
+                        property_indexes: vec![],
                         version: 1,
                     },
                     GraphNodeWrite {
@@ -1210,6 +1276,7 @@ mod tests {
                         source_id,
                         external_id: "platform".into(),
                         properties_json: r#"{"name":"Platform"}"#.into(),
+                        property_indexes: vec![],
                         version: 1,
                     },
                 ],
