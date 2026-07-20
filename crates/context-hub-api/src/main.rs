@@ -2,13 +2,15 @@ use std::{collections::HashMap, fmt::Write as _, net::SocketAddr, sync::Arc};
 
 use chrono::Utc;
 use context_hub_api::context_hub::v1::{
-    DataSource, GetIngestionJobRequest, GetObjectRequest, GetOntologyDraftRequest,
-    GetWorkspaceRequest, GraphNode, GraphQuery, IngestionJob, IngestionState,
-    ListDataSourcesRequest, ListDataSourcesResponse, ListOntologyVersionsRequest,
-    ListOntologyVersionsResponse, ListWorkspacesResponse, OntologyDraft, OntologyVersion,
-    PublishOntologyRequest, QueryGraphResponse, SaveDataSourceRequest, SaveOntologyDraftRequest,
-    StartIngestionRequest, ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue,
-    Workspace,
+    CreateOntologyRequest, DataSource, GetIngestionJobRequest, GetObjectRequest,
+    GetOntologyDraftRequest, GetWorkspaceRequest, GraphNode, GraphQuery, IngestionJob,
+    IngestionState, ListDataSourcesRequest, ListDataSourcesResponse, ListOntologiesRequest,
+    ListOntologiesResponse, ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse,
+    ListOntologyVersionsRequest, ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology,
+    OntologyDataMapping, OntologyDraft, OntologyVersion, PublishOntologyRequest,
+    QueryGraphResponse, SaveDataSourceRequest, SaveOntologyDataMappingRequest,
+    SaveOntologyDraftRequest, StartIngestionRequest, ValidateOntologyRequest,
+    ValidateOntologyResponse, ValidationIssue, Workspace,
     data_source_service_server::{DataSourceService, DataSourceServiceServer},
     graph_service_server::{GraphService, GraphServiceServer},
     ingestion_service_server::{IngestionService, IngestionServiceServer},
@@ -27,9 +29,11 @@ use uuid::Uuid;
 
 #[derive(Clone, Default)]
 struct Runtime {
+    ontologies: Arc<RwLock<HashMap<String, Ontology>>>,
     drafts: Arc<RwLock<HashMap<String, OntologyDraft>>>,
     versions: Arc<RwLock<HashMap<String, Vec<OntologyVersion>>>>,
     data_sources: Arc<RwLock<HashMap<String, DataSource>>>,
+    mappings: Arc<RwLock<HashMap<String, OntologyDataMapping>>>,
     jobs: Arc<RwLock<HashMap<String, IngestionJob>>>,
 }
 
@@ -71,6 +75,17 @@ impl Runtime {
             functions: vec![],
         };
         let now = Utc::now();
+        runtime.ontologies.write().await.insert(
+            ontology_id.clone(),
+            Ontology {
+                id: ontology_id.clone(),
+                workspace_id: dev_workspace_id(),
+                name: definition.display_name.clone(),
+                slug: definition.api_name.clone(),
+                active_version_id: String::new(),
+                revision: 0,
+            },
+        );
         runtime.drafts.write().await.insert(
             ontology_id.clone(),
             OntologyDraft {
@@ -112,6 +127,79 @@ impl WorkspaceService for Runtime {
 
 #[tonic::async_trait]
 impl OntologyService for Runtime {
+    async fn create(
+        &self,
+        request: Request<CreateOntologyRequest>,
+    ) -> Result<Response<Ontology>, Status> {
+        let request = request.into_inner();
+        if request.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        validate_api_name(&request.slug)?;
+        if request.name.trim().is_empty() {
+            return Err(Status::invalid_argument("ontology name is required"));
+        }
+        if self.ontologies.read().await.values().any(|ontology| {
+            ontology.workspace_id == request.workspace_id && ontology.slug == request.slug
+        }) {
+            return Err(Status::already_exists("ontology slug already exists"));
+        }
+        let id = Uuid::new_v4().to_string();
+        let ontology = Ontology {
+            id: id.clone(),
+            workspace_id: request.workspace_id.clone(),
+            name: request.name.clone(),
+            slug: request.slug.clone(),
+            active_version_id: String::new(),
+            revision: 0,
+        };
+        let definition = OntologyDefinition {
+            api_name: request.slug,
+            display_name: request.name.clone(),
+            description: None,
+            object_types: vec![],
+            link_types: vec![],
+            interfaces: vec![],
+            value_types: vec![],
+            struct_types: vec![],
+            shared_properties: vec![],
+            functions: vec![],
+        };
+        self.drafts.write().await.insert(
+            id.clone(),
+            OntologyDraft {
+                id: id.clone(),
+                workspace_id: request.workspace_id,
+                name: request.name,
+                slug: definition.api_name.clone(),
+                revision: 0,
+                definition_json: serde_json::to_string_pretty(&definition)
+                    .map_err(|error| Status::internal(error.to_string()))?,
+                layout_json: "{}".into(),
+                updated_at: Some(timestamp(Utc::now())),
+            },
+        );
+        self.ontologies.write().await.insert(id, ontology.clone());
+        Ok(Response::new(ontology))
+    }
+
+    async fn list(
+        &self,
+        request: Request<ListOntologiesRequest>,
+    ) -> Result<Response<ListOntologiesResponse>, Status> {
+        let workspace_id = request.into_inner().workspace_id;
+        let mut ontologies = self
+            .ontologies
+            .read()
+            .await
+            .values()
+            .filter(|ontology| ontology.workspace_id == workspace_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        ontologies.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(Response::new(ListOntologiesResponse { ontologies }))
+    }
+
     async fn get_draft(
         &self,
         request: Request<GetOntologyDraftRequest>,
@@ -218,9 +306,10 @@ impl OntologyService for Runtime {
         for version in ontology_versions.iter_mut() {
             version.active = false;
         }
+        let ontology_id = request.ontology_id;
         let version = OntologyVersion {
             id: Uuid::new_v4().to_string(),
-            ontology_id: request.ontology_id,
+            ontology_id: ontology_id.clone(),
             version: ontology_versions.len() as u64 + 1,
             definition_json: draft.definition_json,
             checksum,
@@ -228,6 +317,10 @@ impl OntologyService for Runtime {
             published_at: Some(timestamp(Utc::now())),
         };
         ontology_versions.push(version.clone());
+        if let Some(ontology) = self.ontologies.write().await.get_mut(&ontology_id) {
+            ontology.active_version_id.clone_from(&version.id);
+            ontology.revision += 1;
+        }
         Ok(Response::new(version))
     }
 
@@ -283,6 +376,65 @@ impl DataSourceService for Runtime {
             .collect();
         Ok(Response::new(ListDataSourcesResponse { data_sources }))
     }
+
+    async fn save_mapping(
+        &self,
+        request: Request<SaveOntologyDataMappingRequest>,
+    ) -> Result<Response<OntologyDataMapping>, Status> {
+        let mut mapping = request
+            .into_inner()
+            .mapping
+            .ok_or_else(|| Status::invalid_argument("mapping is required"))?;
+        if mapping.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if !self
+            .ontologies
+            .read()
+            .await
+            .contains_key(&mapping.ontology_id)
+        {
+            return Err(Status::not_found("ontology not found"));
+        }
+        if !self
+            .data_sources
+            .read()
+            .await
+            .contains_key(&mapping.data_source_id)
+        {
+            return Err(Status::not_found("data source not found"));
+        }
+        serde_json::from_str::<serde_json::Value>(&mapping.mapping_plan_json)
+            .map_err(|error| Status::invalid_argument(format!("invalid mapping plan: {error}")))?;
+        if mapping.id.is_empty() {
+            mapping.id = Uuid::new_v4().to_string();
+        }
+        let mut mappings = self.mappings.write().await;
+        mapping.revision = mappings
+            .get(&mapping.id)
+            .map_or(1, |current| current.revision + 1);
+        mappings.insert(mapping.id.clone(), mapping.clone());
+        Ok(Response::new(mapping))
+    }
+
+    async fn list_mappings(
+        &self,
+        request: Request<ListOntologyDataMappingsRequest>,
+    ) -> Result<Response<ListOntologyDataMappingsResponse>, Status> {
+        let request = request.into_inner();
+        let mappings = self
+            .mappings
+            .read()
+            .await
+            .values()
+            .filter(|mapping| {
+                mapping.workspace_id == request.workspace_id
+                    && mapping.ontology_id == request.ontology_id
+            })
+            .cloned()
+            .collect();
+        Ok(Response::new(ListOntologyDataMappingsResponse { mappings }))
+    }
 }
 
 #[tonic::async_trait]
@@ -291,19 +443,41 @@ impl IngestionService for Runtime {
         &self,
         request: Request<StartIngestionRequest>,
     ) -> Result<Response<IngestionJob>, Status> {
-        let source_id = request.into_inner().data_source_id;
-        if !self.data_sources.read().await.contains_key(&source_id) {
+        let request = request.into_inner();
+        if !self
+            .data_sources
+            .read()
+            .await
+            .contains_key(&request.data_source_id)
+        {
             return Err(Status::not_found("data source not found"));
+        }
+        let mapping = self
+            .mappings
+            .read()
+            .await
+            .get(&request.ontology_mapping_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("ontology mapping not found"))?;
+        if mapping.data_source_id != request.data_source_id {
+            return Err(Status::invalid_argument(
+                "mapping does not belong to the selected data source",
+            ));
+        }
+        if request.ontology_version_id.is_empty() {
+            return Err(Status::invalid_argument("ontology_version_id is required"));
         }
         let job = IngestionJob {
             id: Uuid::new_v4().to_string(),
-            data_source_id: source_id,
+            data_source_id: request.data_source_id,
             state: IngestionState::Queued as i32,
             rows_read: 0,
             nodes_written: 0,
             edges_written: 0,
             rows_rejected: 0,
             error: String::new(),
+            ontology_mapping_id: request.ontology_mapping_id,
+            ontology_version_id: request.ontology_version_id,
         };
         self.jobs.write().await.insert(job.id.clone(), job.clone());
         Ok(Response::new(job))
@@ -368,6 +542,24 @@ fn dev_workspace() -> Workspace {
         slug: "development".into(),
     }
 }
+fn validate_api_name(value: &str) -> Result<(), Status> {
+    let valid = !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_lowercase())
+        && value.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(Status::invalid_argument(
+            "slug must match [a-z][a-z0-9_]{0,63}",
+        ))
+    }
+}
 fn timestamp(value: chrono::DateTime<Utc>) -> Timestamp {
     Timestamp {
         seconds: value.timestamp(),
@@ -400,4 +592,89 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve(address)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shared_source_keeps_mappings_isolated_by_ontology() {
+        let runtime = Runtime::seeded().await;
+        let first = runtime
+            .create(Request::new(CreateOntologyRequest {
+                workspace_id: dev_workspace_id(),
+                name: "Customer model".into(),
+                slug: "customer_model".into(),
+            }))
+            .await
+            .expect("first ontology can be created")
+            .into_inner();
+        let second = runtime
+            .create(Request::new(CreateOntologyRequest {
+                workspace_id: dev_workspace_id(),
+                name: "Support model".into(),
+                slug: "support_model".into(),
+            }))
+            .await
+            .expect("second ontology can be created")
+            .into_inner();
+        let source = runtime
+            .save(Request::new(SaveDataSourceRequest {
+                data_source: Some(DataSource {
+                    id: String::new(),
+                    workspace_id: dev_workspace_id(),
+                    name: "Shared CRM export".into(),
+                    kind: 1,
+                    configuration_json: "{}".into(),
+                }),
+            }))
+            .await
+            .expect("shared data source can be saved")
+            .into_inner();
+
+        for (ontology, object_type) in [(&first, "customer"), (&second, "ticket")] {
+            runtime
+                .save_mapping(Request::new(SaveOntologyDataMappingRequest {
+                    mapping: Some(OntologyDataMapping {
+                        id: String::new(),
+                        workspace_id: dev_workspace_id(),
+                        ontology_id: ontology.id.clone(),
+                        data_source_id: source.id.clone(),
+                        name: format!("{} mapping", ontology.name),
+                        mapping_plan_json: format!(r#"{{"object_type":"{object_type}"}}"#),
+                        revision: 0,
+                    }),
+                }))
+                .await
+                .expect("ontology-specific mapping can be saved");
+        }
+
+        let first_mappings = runtime
+            .list_mappings(Request::new(ListOntologyDataMappingsRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_id: first.id.clone(),
+            }))
+            .await
+            .expect("first mappings can be listed")
+            .into_inner()
+            .mappings;
+        let second_mappings = runtime
+            .list_mappings(Request::new(ListOntologyDataMappingsRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_id: second.id.clone(),
+            }))
+            .await
+            .expect("second mappings can be listed")
+            .into_inner()
+            .mappings;
+
+        assert_eq!(first_mappings.len(), 1);
+        assert_eq!(second_mappings.len(), 1);
+        assert_eq!(first_mappings[0].data_source_id, source.id);
+        assert_eq!(second_mappings[0].data_source_id, source.id);
+        assert_ne!(first_mappings[0].id, second_mappings[0].id);
+        assert_eq!(first_mappings[0].ontology_id, first.id);
+        assert_eq!(second_mappings[0].ontology_id, second.id);
+    }
 }

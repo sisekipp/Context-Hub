@@ -6,6 +6,7 @@ import type { GraphValue, ImportedGraph } from "@/lib/graph-data";
 import type { OntologyCatalog, OntologyObjectType } from "@/lib/ontology-catalog";
 
 export type SourceRecord = Record<string, GraphValue>;
+export type BrowserDataSource = { id: string; fileName: string; records: SourceRecord[] };
 export type Transform = "None" | "Trim" | "Lowercase" | "Uppercase";
 export type PropertyMapping = { id: string; sourceField: string; targetProperty: string; transform: Transform };
 export type ObjectMapping = { id: string; objectType: string; displayProperty: string; properties: PropertyMapping[] };
@@ -86,6 +87,34 @@ function makeObjectMapping(type: OntologyObjectType, fields: string[], records: 
   return { id: newId(), objectType: type.apiName, displayProperty: type.properties.find((property) => property.apiName === "name")?.apiName ?? type.properties[0]?.apiName ?? "", properties };
 }
 
+function prepareSourceMapping(ontologyId: string, ontology: OntologyCatalog, fileName: string, records: SourceRecord[]) {
+  const fields = Array.from(new Set(records.slice(0, 200).flatMap((record) => Object.keys(record))));
+  const firstType = ontology.objectTypes[0];
+  if (!firstType) throw new Error("Create an Object Type in this ontology first");
+  const firstMapping = makeObjectMapping(firstType, fields, records);
+  const automaticLinks = ontology.linkTypes
+    .filter((link) => link.sourceType === firstType.apiName && matchingLinkField(fields, link))
+    .map((link) => ({ id: newId(), sourceObjectMappingId: firstMapping.id, sourceField: matchingLinkField(fields, link)!, linkType: link.apiName, missingTarget: "create" as const }));
+  let objectMappings = [firstMapping];
+  let linkMappings: LinkMapping[] = automaticLinks;
+  let revision = 0;
+  const saved = localStorage.getItem(`context-hub.mapping.${ontologyId}`);
+  if (saved) {
+    try {
+      const candidate = JSON.parse(saved) as { revision?: number; fileName?: string; objectMappings?: ObjectMapping[]; linkMappings?: LinkMapping[] };
+      const typesStillExist = candidate.objectMappings?.every((mapping) => ontology.objectTypes.some((type) => type.apiName === mapping.objectType));
+      if (candidate.fileName === fileName && candidate.objectMappings?.length && typesStillExist) {
+        objectMappings = candidate.objectMappings;
+        linkMappings = candidate.linkMappings ?? [];
+        revision = candidate.revision ?? 0;
+      }
+    } catch {
+      // Ignore an unreadable local draft and create a new mapping from the detected schema.
+    }
+  }
+  return { objectMappings, linkMappings, revision };
+}
+
 function linkForMapping(link: LinkMapping, objectMappings: ObjectMapping[], ontology: OntologyCatalog) {
   const sourceMapping = objectMappings.find((mapping) => mapping.id === link.sourceObjectMappingId);
   return ontology.linkTypes.find((type) => type.apiName === link.linkType && type.sourceType === sourceMapping?.objectType);
@@ -150,15 +179,23 @@ export function buildImportedGraph(options: {
   };
 }
 
-export function MappingPanel({ ontology, onImport }: { ontology: OntologyCatalog; onImport: (graph: ImportedGraph) => void }) {
-  const [fileName, setFileName] = useState("");
-  const [records, setRecords] = useState<SourceRecord[]>([]);
-  const [objectMappings, setObjectMappings] = useState<ObjectMapping[]>([]);
-  const [activeMappingId, setActiveMappingId] = useState("");
-  const [linkMappings, setLinkMappings] = useState<LinkMapping[]>([]);
+export function MappingPanel({ ontologyId, ontology, dataSource, onDataSourceLoaded, onImport }: { ontologyId: string; ontology: OntologyCatalog; dataSource: BrowserDataSource | null; onDataSourceLoaded: (source: BrowserDataSource) => void; onImport: (graph: ImportedGraph) => void }) {
+  const prepared = useMemo(() => {
+    if (!dataSource) return { objectMappings: [] as ObjectMapping[], linkMappings: [] as LinkMapping[], revision: 0, error: "" };
+    try {
+      return { ...prepareSourceMapping(ontologyId, ontology, dataSource.fileName, dataSource.records), error: "" };
+    } catch (error) {
+      return { objectMappings: [] as ObjectMapping[], linkMappings: [] as LinkMapping[], revision: 0, error: error instanceof Error ? error.message : "The source cannot be mapped." };
+    }
+  }, [dataSource, ontology, ontologyId]);
+  const [fileName] = useState(dataSource?.fileName ?? "");
+  const [records] = useState<SourceRecord[]>(dataSource?.records ?? []);
+  const [objectMappings, setObjectMappings] = useState<ObjectMapping[]>(prepared.objectMappings);
+  const [activeMappingId, setActiveMappingId] = useState(prepared.objectMappings[0]?.id ?? "");
+  const [linkMappings, setLinkMappings] = useState<LinkMapping[]>(prepared.linkMappings);
   const [previewGraph, setPreviewGraph] = useState<ImportedGraph | null>(null);
-  const [revision, setRevision] = useState(0);
-  const [message, setMessage] = useState("Choose a JSON, NDJSON or CSV file.");
+  const [revision, setRevision] = useState(prepared.revision);
+  const [message, setMessage] = useState(prepared.error || (dataSource ? `${dataSource.records.length.toLocaleString("de-DE")} records ready from the shared workspace source.` : "Choose a JSON, NDJSON or CSV file."));
   const sourceFields = useMemo(() => Array.from(new Set(records.flatMap((record) => Object.keys(record)))), [records]);
   const activeMapping = objectMappings.find((mapping) => mapping.id === activeMappingId) ?? objectMappings[0];
   const activeType = ontology.objectTypes.find((type) => type.apiName === activeMapping?.objectType);
@@ -169,32 +206,8 @@ export function MappingPanel({ ontology, onImport }: { ontology: OntologyCatalog
     try {
       const parsed = parseSource(file.name, await file.text());
       if (!parsed.length) throw new Error("No object records found");
-      const fields = Array.from(new Set(parsed.slice(0, 200).flatMap((record) => Object.keys(record))));
-      const firstType = ontology.objectTypes[0];
-      if (!firstType) throw new Error("Create an Object Type in the ontology first");
-      const firstMapping = makeObjectMapping(firstType, fields, parsed);
-      const automaticLinks = ontology.linkTypes.filter((link) => link.sourceType === firstType.apiName && matchingLinkField(fields, link)).map((link) => ({ id: newId(), sourceObjectMappingId: firstMapping.id, sourceField: matchingLinkField(fields, link)!, linkType: link.apiName, missingTarget: "create" as const }));
-      let nextObjectMappings = [firstMapping];
-      let nextLinkMappings: LinkMapping[] = automaticLinks;
-      let nextRevision = 0;
-      const saved = localStorage.getItem("context-hub.mapping");
-      if (saved) {
-        try {
-          const candidate = JSON.parse(saved) as { revision?: number; fileName?: string; objectMappings?: ObjectMapping[]; linkMappings?: LinkMapping[] };
-          const typesStillExist = candidate.objectMappings?.every((mapping) => ontology.objectTypes.some((type) => type.apiName === mapping.objectType));
-          if (candidate.fileName === file.name && candidate.objectMappings?.length && typesStillExist) {
-            nextObjectMappings = candidate.objectMappings;
-            nextLinkMappings = candidate.linkMappings ?? [];
-            nextRevision = candidate.revision ?? 0;
-          }
-        } catch {
-          // Ignore an unreadable local draft and create a new mapping from the detected schema.
-        }
-      }
-      setFileName(file.name); setRecords(parsed); setObjectMappings(nextObjectMappings); setActiveMappingId(nextObjectMappings[0].id); setLinkMappings(nextLinkMappings); setPreviewGraph(null); setRevision(nextRevision);
-      setMessage(`${parsed.length.toLocaleString("de-DE")} records read. ${nextRevision ? `Saved mapping revision ${nextRevision} restored.` : "Mappings now reference ontology types."}`);
+      onDataSourceLoaded({ id: crypto.randomUUID(), fileName: file.name, records: parsed });
     } catch (error) {
-      setFileName(file.name); setRecords([]); setObjectMappings([]); setLinkMappings([]);
       setMessage(error instanceof Error ? error.message : "The file could not be parsed.");
     }
   }
@@ -242,7 +255,7 @@ export function MappingPanel({ ontology, onImport }: { ontology: OntologyCatalog
 
   function saveMapping() {
     const nextRevision = revision + 1;
-    localStorage.setItem("context-hub.mapping", JSON.stringify({ revision: nextRevision, fileName, objectMappings, linkMappings }));
+    localStorage.setItem(`context-hub.mapping.${ontologyId}`, JSON.stringify({ revision: nextRevision, fileName, objectMappings, linkMappings }));
     setRevision(nextRevision); setMessage(`Mapping revision ${nextRevision} saved locally.`);
   }
 

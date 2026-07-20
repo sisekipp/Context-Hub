@@ -44,6 +44,23 @@ const initialEdges: OntologyEdge[] = [
   { id: "implements", source: "service", target: "deployable", label: "implements", type: "smoothstep", style: { strokeDasharray: "5 5" }, data: { apiName: "implements", displayName: "Implements", description: "Interface implementation", sourceCardinality: "many", targetCardinality: "many", properties: [] } },
 ];
 
+function initialDocument(ontologyId: string, seedTemplate: boolean) {
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem(`context-hub.ontology.${ontologyId}`);
+      if (saved) {
+        const parsed = JSON.parse(saved) as { nodes?: OntologyNode[]; edges?: OntologyEdge[] };
+        if (Array.isArray(parsed.nodes) && Array.isArray(parsed.edges)) return { nodes: parsed.nodes, edges: parsed.edges };
+      }
+    } catch {
+      // Start with a fresh document if this ontology's local draft cannot be read.
+    }
+  }
+  return seedTemplate
+    ? { nodes: JSON.parse(JSON.stringify(initialNodes)) as OntologyNode[], edges: JSON.parse(JSON.stringify(initialEdges)) as OntologyEdge[] }
+    : { nodes: [] as OntologyNode[], edges: [] as OntologyEdge[] };
+}
+
 const kindMeta: Record<NodeKind, { label: string; icon: typeof Braces }> = {
   object: { label: "Object type", icon: Braces }, interface: { label: "Interface", icon: GitFork },
   value_type: { label: "Value type", icon: CircleDot }, struct: { label: "Struct", icon: Component },
@@ -58,10 +75,11 @@ function OntologyCard({ data, selected }: NodeProps<OntologyNode>) {
   </div>;
 }
 
-export function OntologyEditor({ onCatalogChange }: { onCatalogChange?: (catalog: OntologyCatalog) => void }) {
-  const [nodes, setNodes, onNodesChange] = useNodesState<OntologyNode>(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<OntologyEdge>(initialEdges);
-  const [selectedId, setSelectedId] = useState<string>("service");
+export function OntologyEditor({ ontologyId, ontologyName, seedTemplate, onRename, onCatalogChange }: { ontologyId: string; ontologyName: string; seedTemplate: boolean; onRename: (name: string) => void; onCatalogChange?: (catalog: OntologyCatalog) => void }) {
+  const document = useMemo(() => initialDocument(ontologyId, seedTemplate), [ontologyId, seedTemplate]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<OntologyNode>(document.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<OntologyEdge>(document.edges);
+  const [selectedId, setSelectedId] = useState<string>(document.nodes[0]?.id ?? "");
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [saveState, setSaveState] = useState("Autosave on");
   const [notice, setNotice] = useState<string | null>(null);
@@ -93,9 +111,9 @@ export function OntologyEditor({ onCatalogChange }: { onCatalogChange?: (catalog
         properties: edge.data!.properties.map((property) => ({ apiName: property.name, displayName: property.name, type: property.type })),
       })),
     });
-    const timeout = window.setTimeout(() => { localStorage.setItem("context-hub.ontology", JSON.stringify({ nodes, edges })); setSaveState("Saved locally"); }, 500);
+    const timeout = window.setTimeout(() => { localStorage.setItem(`context-hub.ontology.${ontologyId}`, JSON.stringify({ nodes, edges })); setSaveState("Saved locally"); }, 500);
     return () => window.clearTimeout(timeout);
-  }, [nodes, edges, onCatalogChange]);
+  }, [nodes, edges, onCatalogChange, ontologyId]);
 
   function addNode(kind: NodeKind) {
     const count = nodes.filter((node) => node.data.kind === kind).length + 1;
@@ -137,7 +155,7 @@ export function OntologyEditor({ onCatalogChange }: { onCatalogChange?: (catalog
     setNotice(invalidNode ? `Invalid API name: ${invalidNode.data.apiName}` : invalidLink ? "A link needs a valid API name" : missingIdentity ? `${missingIdentity.data.displayName} needs an identity property` : "The ontology draft is valid. Functions are read-only; Actions are not part of this version.");
   }
 
-  return <div className="workspace-view"><header className="stage-header"><div><span className="eyebrow">Ontology editor</span><h1>Service map</h1><p>Object types, links, interfaces, reusable types and read-only functions.</p></div><div className="header-actions"><span className="save-state"><Save size={13}/> {saveState}</span><button className="button secondary" onClick={validateAndPublish}><Check size={15}/> Validate</button><button className="button primary" onClick={validateAndPublish}><Send size={15}/> Publish</button></div></header>
+  return <div className="workspace-view"><header className="stage-header"><div><span className="eyebrow">Ontology editor · isolated model</span><input className="ontology-name-input" aria-label="Ontology name" value={ontologyName} onChange={(event) => onRename(event.target.value)}/><p>Object types, links, interfaces, reusable types and read-only functions.</p></div><div className="header-actions"><span className="save-state"><Save size={13}/> {saveState}</span><button className="button secondary" onClick={validateAndPublish}><Check size={15}/> Validate</button><button className="button primary" onClick={validateAndPublish}><Send size={15}/> Publish</button></div></header>
     {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
     <div className="editor-layout"><div className="canvas-panel"><div className="canvas-toolbar">{(["object", "interface", "value_type", "struct", "shared_property", "function"] as NodeKind[]).map((kind) => <button key={kind} onClick={() => addNode(kind)}><Plus size={14}/> {kindMeta[kind].label}</button>)}</div>
       <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={connect} onNodeClick={(_, node) => { setSelectedId(node.id); setSelectedEdgeId(null); }} onEdgeClick={(_, edge) => { setSelectedId(""); setSelectedEdgeId(edge.id); }} fitView><Background variant={BackgroundVariant.Dots} gap={18} size={1}/><MiniMap pannable zoomable/><Controls/></ReactFlow></div>

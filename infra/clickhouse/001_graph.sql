@@ -72,6 +72,22 @@ CREATE TABLE IF NOT EXISTS context_hub.data_sources (
 ) ENGINE = ReplacingMergeTree(revision, deleted)
 ORDER BY (workspace_id, id);
 
+-- Data sources are shared within a workspace. Their interpretation belongs to an ontology,
+-- therefore mapping plans live in this association table rather than on data_sources.
+CREATE TABLE IF NOT EXISTS context_hub.ontology_data_mappings (
+  id UUID,
+  workspace_id UUID,
+  ontology_id UUID,
+  data_source_id UUID,
+  name String,
+  mapping_plan_json String,
+  revision UInt64,
+  deleted Bool DEFAULT false,
+  created_at DateTime64(6, 'UTC') DEFAULT now64(6),
+  updated_at DateTime64(6, 'UTC') DEFAULT now64(6)
+) ENGINE = ReplacingMergeTree(revision, deleted)
+ORDER BY (workspace_id, ontology_id, data_source_id, id);
+
 CREATE TABLE IF NOT EXISTS context_hub.ingestion_jobs (
   id UUID,
   workspace_id UUID,

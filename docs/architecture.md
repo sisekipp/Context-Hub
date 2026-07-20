@@ -2,7 +2,7 @@
 
 ## Data flow
 
-1. A user edits an ontology draft in the React Flow editor.
+1. A user selects or creates an ontology in a workspace and edits its draft in the React Flow editor.
 2. `OntologyService.Validate` applies the Rust domain validator.
 3. `OntologyService.Publish` creates an immutable version with a SHA-256 checksum.
 4. File, REST, or GraphQL records are normalized into Arrow `RecordBatch` streams.
@@ -12,11 +12,17 @@
 8. `GraphService` validates a typed query against the active ontology and compiles a parameterized, workspace-scoped ClickHouse query.
 9. The UI and read-only MCP surface receive only bounded graph results.
 
-The current UI vertical slice also offers an immediate local file path: JSON, NDJSON, and CSV records are parsed in the browser, mapped into the shared graph model, and handed to the 2D/3D explorer. This removes demo counts and demo nodes while the durable worker-to-ClickHouse ingestion loop is still being connected.
+The current UI vertical slice also offers an immediate local file path: JSON, NDJSON, and CSV records are parsed in the browser, mapped into the selected ontology's graph model, and handed to its 2D/3D explorer. Editor drafts, mapping drafts, and in-memory explorer graphs are isolated by ontology ID.
+
+## Multi-ontology ownership
+
+A workspace can contain many independent ontologies. Data sources belong to the workspace and can therefore be reused by every ontology in that workspace. The interpretation of a source never lives on the source itself: `ontology_data_mappings` associates one ontology with one shared data source and owns the mapping plan and its revision.
+
+Published graph data is scoped by both `workspace_id` and `ontology_version_id`. Changing the active ontology changes the editor, mappings, ingestion jobs, and graph explorer together. Cross-ontology links are not created implicitly; an explicit future federation feature would be required for those.
 
 ## Storage
 
-ClickHouse is the unified control and data plane. Revisioned `ReplacingMergeTree` tables store workspaces, drafts, versions, data-source definitions, mapping plans, credential envelopes, and ingestion jobs. The same database stores versioned nodes, edges, typed property indices, and ingestion events. Graph sort keys begin with `workspace_id` and `ontology_version_id`. API callers never receive raw SQL access.
+ClickHouse is the unified control and data plane. Revisioned `ReplacingMergeTree` tables store workspaces, drafts, versions, workspace-level data-source definitions, ontology-specific mapping plans, credential envelopes, and ingestion jobs. The same database stores versioned nodes, edges, typed property indices, and ingestion events. Graph sort keys begin with `workspace_id` and `ontology_version_id`. API callers never receive raw SQL access.
 
 Uploads are addressed through Apache Arrow's `object_store` abstraction. MinIO is only the local S3-compatible implementation.
 

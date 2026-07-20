@@ -15,6 +15,7 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - gRPC and gRPC-Web contracts for workspaces, ontologies, data sources, ingestion, and graph queries.
 - Read-only MCP tools for schema discovery and graph access.
 - A Next.js frontend with an editable React Flow ontology/link editor, revisioned ontology-bound JSON/NDJSON/CSV object and link mappings, and a connected 2D/3D graph explorer.
+- A workspace ontology switcher: users can create multiple isolated ontologies, while data-source definitions remain reusable at workspace level and mappings remain ontology-specific.
 - A Devcontainer with ClickHouse and MinIO. Local development uses `AUTH_MODE=dev`; no authentication service is started.
 
 ## Quick start
@@ -59,3 +60,5 @@ infra/                      ClickHouse bootstrap schema
 Actions, scenarios, GeoPoint/GeoShape, Attachment/MediaReference, status/render metadata, write-capable MCP tools, direct database connectors, and arbitrary user SQL are deliberately excluded. Functions are included as read-only expression, external gRPC, or WASM definitions. ConnectorX is reserved for a later direct-database connector milestone.
 
 The current browser vertical slice parses JSON, NDJSON, and CSV locally and passes the resulting objects and links directly to the explorer. The Rust Arrow/DataFusion and ClickHouse components are present, but durable upload/job/reload wiring remains a production integration; refreshing the browser clears an imported graph.
+
+Each ontology currently keeps its own local editor draft, mapping draft, and in-session explorer graph. Shared-source persistence and durable per-ontology graph imports are the next integration step.

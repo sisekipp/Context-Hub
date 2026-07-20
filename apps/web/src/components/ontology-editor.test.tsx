@@ -16,9 +16,14 @@ import { OntologyEditor } from "./ontology-editor";
 
 describe("OntologyEditor", () => {
   it("renders the seeded ontology workflow", () => {
-    render(<OntologyEditor />);
-    expect(screen.getByRole("heading", { name: "Service map" })).toBeInTheDocument();
+    render(<OntologyEditor ontologyId="service-map" ontologyName="Service map" seedTemplate onRename={vi.fn()} />);
+    expect(screen.getByRole("textbox", { name: "Ontology name" })).toHaveValue("Service map");
     expect(screen.getByRole("button", { name: /Publish/ })).toBeInTheDocument();
   });
-});
 
+  it("starts a newly created ontology without the service-map template", () => {
+    render(<OntologyEditor ontologyId="new-ontology" ontologyName="New ontology" seedTemplate={false} onRename={vi.fn()} />);
+    expect(screen.queryByText("Service")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Object type/ })).toBeInTheDocument();
+  });
+});

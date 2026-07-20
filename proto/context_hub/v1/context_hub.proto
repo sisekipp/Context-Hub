@@ -30,6 +30,15 @@ message OntologyDraft {
   google.protobuf.Timestamp updated_at = 8;
 }
 
+message Ontology {
+  string id = 1;
+  string workspace_id = 2;
+  string name = 3;
+  string slug = 4;
+  string active_version_id = 5;
+  uint64 revision = 6;
+}
+
 message OntologyVersion {
   string id = 1;
   string ontology_id = 2;
@@ -61,8 +70,17 @@ message PublishOntologyRequest {
 }
 message ListOntologyVersionsRequest { string ontology_id = 1; }
 message ListOntologyVersionsResponse { repeated OntologyVersion versions = 1; }
+message ListOntologiesRequest { string workspace_id = 1; }
+message ListOntologiesResponse { repeated Ontology ontologies = 1; }
+message CreateOntologyRequest {
+  string workspace_id = 1;
+  string name = 2;
+  string slug = 3;
+}
 
 service OntologyService {
+  rpc Create(CreateOntologyRequest) returns (Ontology);
+  rpc List(ListOntologiesRequest) returns (ListOntologiesResponse);
   rpc GetDraft(GetOntologyDraftRequest) returns (OntologyDraft);
   rpc SaveDraft(SaveOntologyDraftRequest) returns (OntologyDraft);
   rpc Validate(ValidateOntologyRequest) returns (ValidateOntologyResponse);
@@ -78,20 +96,39 @@ enum DataSourceKind {
 }
 
 message DataSource {
+  reserved 6;
+  reserved "mapping_plan_json";
   string id = 1;
   string workspace_id = 2;
   string name = 3;
   DataSourceKind kind = 4;
   string configuration_json = 5;
-  string mapping_plan_json = 6;
 }
 message ListDataSourcesRequest { string workspace_id = 1; }
 message ListDataSourcesResponse { repeated DataSource data_sources = 1; }
 message SaveDataSourceRequest { DataSource data_source = 1; }
 
+message OntologyDataMapping {
+  string id = 1;
+  string workspace_id = 2;
+  string ontology_id = 3;
+  string data_source_id = 4;
+  string name = 5;
+  string mapping_plan_json = 6;
+  uint64 revision = 7;
+}
+message SaveOntologyDataMappingRequest { OntologyDataMapping mapping = 1; }
+message ListOntologyDataMappingsRequest {
+  string workspace_id = 1;
+  string ontology_id = 2;
+}
+message ListOntologyDataMappingsResponse { repeated OntologyDataMapping mappings = 1; }
+
 service DataSourceService {
   rpc Save(SaveDataSourceRequest) returns (DataSource);
   rpc List(ListDataSourcesRequest) returns (ListDataSourcesResponse);
+  rpc SaveMapping(SaveOntologyDataMappingRequest) returns (OntologyDataMapping);
+  rpc ListMappings(ListOntologyDataMappingsRequest) returns (ListOntologyDataMappingsResponse);
 }
 
 enum IngestionState {
@@ -112,8 +149,14 @@ message IngestionJob {
   uint64 edges_written = 6;
   uint64 rows_rejected = 7;
   string error = 8;
+  string ontology_mapping_id = 9;
+  string ontology_version_id = 10;
 }
-message StartIngestionRequest { string data_source_id = 1; }
+message StartIngestionRequest {
+  string data_source_id = 1;
+  string ontology_mapping_id = 2;
+  string ontology_version_id = 3;
+}
 message GetIngestionJobRequest { string id = 1; }
 
 service IngestionService {
@@ -179,4 +222,3 @@ service GraphService {
   rpc Query(GraphQuery) returns (QueryGraphResponse);
   rpc GetObject(GetObjectRequest) returns (GraphNode);
 }
-

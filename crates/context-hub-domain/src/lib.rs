@@ -273,6 +273,7 @@ impl OntologyDraft {
 }
 
 impl OntologyDefinition {
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
         validate_api_name("api_name", &self.api_name, &mut issues);
@@ -577,14 +578,14 @@ fn validate_type_reference(
 ) {
     match value {
         TypeReference::Scalar { value_type } => {
-            if let ScalarType::Enum { values } = &value_type.scalar {
-                if values.is_empty() {
-                    issues.push(issue(
-                        path,
-                        "empty_enum",
-                        "enum types need at least one value",
-                    ));
-                }
+            if let ScalarType::Enum { values } = &value_type.scalar
+                && values.is_empty()
+            {
+                issues.push(issue(
+                    path,
+                    "empty_enum",
+                    "enum types need at least one value",
+                ));
             }
         }
         TypeReference::ValueType { api_name, .. } if !value_types.contains(api_name.as_str()) => {
@@ -910,7 +911,11 @@ mod tests {
             },
             read_only: false,
         });
-        let codes: HashSet<_> = ontology.validate().into_iter().map(|issue| issue.code).collect();
+        let codes: HashSet<_> = ontology
+            .validate()
+            .into_iter()
+            .map(|issue| issue.code)
+            .collect();
         assert!(codes.contains("actions_not_supported"));
         assert!(codes.contains("unknown_struct_type"));
     }

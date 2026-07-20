@@ -29,6 +29,12 @@ button { color: inherit; }
 .status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
 .status i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-2); box-shadow: 0 0 8px #5ed3b599; }
 .eyebrow { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.ontology-switcher { display: flex; flex-direction: column; gap: 7px; margin-bottom: 15px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #0e141e; }
+.ontology-switcher > div { display: flex; align-items: center; justify-content: space-between; }
+.ontology-switcher button { display: grid; place-items: center; width: 23px; height: 23px; border: 1px solid #34415a; border-radius: 6px; color: #cbd6e8; background: #182130; cursor: pointer; }
+.ontology-switcher button:hover { border-color: var(--accent); color: #fff; }
+.ontology-switcher select { width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; outline: none; color: var(--text); background: #090e16; font-size: 11px; }
+.ontology-switcher small { color: var(--muted); font-size: 8px; }
 .sidebar nav { display: flex; flex-direction: column; gap: 4px; }
 .nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border: 0; border-radius: 8px; color: #9caac0; background: transparent; cursor: pointer; text-align: left; font-size: 13px; }
 .nav-item:hover { color: var(--text); background: #141b27; }
@@ -43,6 +49,7 @@ button { color: inherit; }
 .workspace-view { display: flex; flex-direction: column; }
 .stage-header { flex: 0 0 104px; min-height: 0; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 20px 26px; border-bottom: 1px solid var(--line); background: #0d121b; }
 .stage-header h1 { margin: 3px 0 2px; font-size: 23px; letter-spacing: -.035em; }
+.ontology-name-input { display: block; width: min(420px, 45vw); margin: 2px 0; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 23px; font-weight: 700; letter-spacing: -.035em; }
 .stage-header p { margin: 0; color: var(--muted); font-size: 12px; }
 .binding-pills { display: flex; gap: 5px; margin-top: 7px; }
 .binding-pills span { padding: 3px 6px; border: 1px solid #334568; border-radius: 999px; color: #afc0ec; background: #18233a; font-size: 8px; }
