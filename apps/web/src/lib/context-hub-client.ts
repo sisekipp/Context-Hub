@@ -38,6 +38,7 @@ export type BackendObjectMapping = {
 };
 
 export type BackendLinkMapping = {
+  sourceObjectType: string;
   sourceField: string;
   linkType: string;
   targetObjectType: string;
@@ -160,7 +161,7 @@ function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapp
       transforms: transforms[field.transform],
       on_error: "reject_row",
     })),
-    links: links.map((link) => ({
+    links: links.filter((link) => link.sourceObjectType === objectMapping.objectType).map((link) => ({
       link_type: link.linkType,
       target_object_type: link.targetObjectType,
       source_fields: [link.sourceField],
@@ -171,12 +172,19 @@ function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapp
   };
 }
 
+function mappingBundle(objectMappings: BackendObjectMapping[], links: BackendLinkMapping[]) {
+  return {
+    id: crypto.randomUUID(),
+    plans: objectMappings.map((objectMapping) => mappingPlan(objectMapping, links)),
+  };
+}
+
 export async function saveOntologyMapping(options: {
   id?: string;
   ontologyId: string;
   dataSourceId: string;
   name: string;
-  objectMapping: BackendObjectMapping;
+  objectMappings: BackendObjectMapping[];
   links: BackendLinkMapping[];
 }) {
   return dataSources.saveMapping({ mapping: {
@@ -185,7 +193,7 @@ export async function saveOntologyMapping(options: {
     ontologyId: options.ontologyId,
     dataSourceId: options.dataSourceId,
     name: options.name,
-    mappingPlanJson: JSON.stringify(mappingPlan(options.objectMapping, options.links)),
+    mappingPlanJson: JSON.stringify(mappingBundle(options.objectMappings, options.links)),
     revision: 0n,
   } });
 }

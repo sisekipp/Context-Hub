@@ -30,6 +30,19 @@ pub struct MappingPlan {
     pub row_filter: Option<Predicate>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct MappingBundle {
+    pub id: Uuid,
+    pub plans: Vec<MappingPlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(untagged)]
+pub enum MappingDocument {
+    Bundle(MappingBundle),
+    Plan(MappingPlan),
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceFormat {
@@ -48,6 +61,7 @@ pub struct MappedNode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MappedEdge {
     pub link_type: String,
+    pub source_object_type: String,
     pub source_id: String,
     pub target_object_type: String,
     pub target_id: String,
@@ -178,6 +192,10 @@ pub enum MappingError {
     InvalidIdentifier(String),
     #[error("mapping plan contains duplicate target '{0}'")]
     DuplicateTarget(String),
+    #[error("mapping bundle needs at least one object plan")]
+    EmptyBundle,
+    #[error("mapping bundle contains duplicate object plan '{0}'")]
+    DuplicateObjectPlan(String),
     #[error("mapping execution failed: {0}")]
     Execution(#[from] datafusion::error::DataFusionError),
     #[error("Arrow source processing failed: {0}")]
@@ -284,6 +302,50 @@ impl MappingPlan {
     }
 }
 
+impl MappingBundle {
+    /// Validates every object plan and prevents ambiguous duplicate producers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MappingError`] when the bundle is empty, contains duplicate object types, or one
+    /// of its plans is invalid.
+    pub fn validate(&self) -> Result<(), MappingError> {
+        if self.plans.is_empty() {
+            return Err(MappingError::EmptyBundle);
+        }
+        let mut object_types = std::collections::HashSet::new();
+        for plan in &self.plans {
+            plan.validate()?;
+            if !object_types.insert(plan.object_type.as_str()) {
+                return Err(MappingError::DuplicateObjectPlan(plan.object_type.clone()));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl MappingDocument {
+    #[must_use]
+    pub fn plans(&self) -> &[MappingPlan] {
+        match self {
+            Self::Bundle(bundle) => &bundle.plans,
+            Self::Plan(plan) => std::slice::from_ref(plan),
+        }
+    }
+
+    /// Validates either a legacy single plan or a multi-object bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MappingError`] when the contained mapping is invalid.
+    pub fn validate(&self) -> Result<(), MappingError> {
+        match self {
+            Self::Bundle(bundle) => bundle.validate(),
+            Self::Plan(plan) => plan.validate(),
+        }
+    }
+}
+
 /// Executes a mapping plan over in-memory Arrow record batches.
 ///
 /// # Errors
@@ -313,24 +375,82 @@ pub async fn execute_source_mapping(
     format: SourceFormat,
     content: &[u8],
 ) -> Result<MappedGraphBatch, MappingError> {
-    plan.validate()?;
+    execute_source_mapping_bundle(std::slice::from_ref(plan), format, content).await
+}
+
+/// Executes multiple object plans over one shared Arrow source and resolves their links globally.
+///
+/// # Errors
+///
+/// Returns [`MappingError`] when a plan is invalid, the source cannot be read, or a link configured
+/// with [`MissingTargetStrategy::Error`] cannot be resolved by any plan in the bundle.
+pub async fn execute_source_mapping_bundle(
+    plans: &[MappingPlan],
+    format: SourceFormat,
+    content: &[u8],
+) -> Result<MappedGraphBatch, MappingError> {
+    validate_plan_set(plans)?;
     let batches = read_source_batches(format, content)?;
     let rows_read = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
     if batches.is_empty() {
         return Ok(MappedGraphBatch::default());
     }
-    let schema = batches[0].schema();
-    let worker_plan = worker_projection(plan);
-    let mapped = execute_mapping(&worker_plan, schema, batches).await?;
-    let rows = record_batches_to_json(&mapped)?;
     let mut result = MappedGraphBatch {
         rows_read: rows_read as u64,
         ..MappedGraphBatch::default()
     };
+    let mut node_positions = std::collections::HashMap::new();
+    let mut pending_edges = Vec::new();
+    for plan in plans {
+        let (nodes, rows_rejected, edges) = map_plan_batches(plan, &batches).await?;
+        result.rows_rejected += rows_rejected;
+        for node in nodes {
+            merge_node(&mut result.nodes, &mut node_positions, node)?;
+        }
+        pending_edges.extend(edges);
+    }
+    resolve_pending_edges(&mut result, pending_edges)?;
+    let mut edge_keys = std::collections::HashSet::new();
+    result.edges.retain(|edge| {
+        edge_keys.insert((
+            edge.source_object_type.clone(),
+            edge.source_id.clone(),
+            edge.link_type.clone(),
+            edge.target_object_type.clone(),
+            edge.target_id.clone(),
+        ))
+    });
+    Ok(result)
+}
+
+fn validate_plan_set(plans: &[MappingPlan]) -> Result<(), MappingError> {
+    if plans.is_empty() {
+        return Err(MappingError::EmptyBundle);
+    }
+    let mut object_types = std::collections::HashSet::new();
+    for plan in plans {
+        plan.validate()?;
+        if !object_types.insert(plan.object_type.as_str()) {
+            return Err(MappingError::DuplicateObjectPlan(plan.object_type.clone()));
+        }
+    }
+    Ok(())
+}
+
+async fn map_plan_batches(
+    plan: &MappingPlan,
+    batches: &[RecordBatch],
+) -> Result<(Vec<MappedNode>, u64, Vec<PendingEdge>), MappingError> {
+    let schema = batches[0].schema();
+    let worker_plan = worker_projection(plan);
+    let mapped = execute_mapping(&worker_plan, schema, batches.to_vec()).await?;
+    let rows = record_batches_to_json(&mapped)?;
+    let mut nodes = Vec::new();
+    let mut rows_rejected = 0;
     let mut pending_edges = Vec::new();
     for row in rows {
         let Some(object) = row.as_object() else {
-            result.rows_rejected += 1;
+            rows_rejected += 1;
             continue;
         };
         let identity = (0..plan.identity_fields.len())
@@ -338,7 +458,7 @@ pub async fn execute_source_mapping(
             .collect::<Option<Vec<_>>>();
         let Some(identity) = identity.filter(|values| values.iter().all(|value| !value.is_null()))
         else {
-            result.rows_rejected += 1;
+            rows_rejected += 1;
             continue;
         };
         let object_id = stable_object_id(&plan.object_type, &identity);
@@ -352,7 +472,7 @@ pub async fn execute_source_mapping(
                     .map(|value| (field.target.clone(), value))
             })
             .collect::<serde_json::Map<_, _>>();
-        result.nodes.push(MappedNode {
+        nodes.push(MappedNode {
             object_type: plan.object_type.clone(),
             object_id: object_id.clone(),
             properties_json: serde_json::to_string(&properties)?,
@@ -378,6 +498,7 @@ pub async fn execute_source_mapping(
                 pending_edges.push(PendingEdge {
                     edge: MappedEdge {
                         link_type: link.link_type.clone(),
+                        source_object_type: plan.object_type.clone(),
                         source_id: object_id.clone(),
                         target_object_type: link.target_object_type.clone(),
                         target_id,
@@ -389,8 +510,30 @@ pub async fn execute_source_mapping(
             }
         }
     }
-    resolve_pending_edges(&mut result, pending_edges)?;
-    Ok(result)
+    Ok((nodes, rows_rejected, pending_edges))
+}
+
+fn merge_node(
+    nodes: &mut Vec<MappedNode>,
+    positions: &mut std::collections::HashMap<(String, String), usize>,
+    node: MappedNode,
+) -> Result<(), MappingError> {
+    let key = (node.object_type.clone(), node.object_id.clone());
+    if let Some(index) = positions.get(&key).copied() {
+        let existing = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            &nodes[index].properties_json,
+        )?;
+        let incoming = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            &node.properties_json,
+        )?;
+        let mut merged = existing;
+        merged.extend(incoming);
+        nodes[index].properties_json = serde_json::to_string(&merged)?;
+    } else {
+        positions.insert(key, nodes.len());
+        nodes.push(node);
+    }
+    Ok(())
 }
 
 fn resolve_pending_edges(
@@ -809,5 +952,112 @@ mod tests {
         .await
         .expect_err("missing targets can fail the mapping");
         assert!(matches!(error, MappingError::MissingLinkTarget { .. }));
+    }
+
+    #[tokio::test]
+    async fn maps_multiple_object_types_and_resolves_links_globally() {
+        let service_plan = MappingPlan {
+            id: Uuid::new_v4(),
+            object_type: "service".into(),
+            identity_fields: vec!["service_id".into()],
+            fields: vec![
+                FieldMapping {
+                    source: "service_id".into(),
+                    target: "id".into(),
+                    transforms: vec![],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+                FieldMapping {
+                    source: "service_name".into(),
+                    target: "name".into(),
+                    transforms: vec![Transform::Trim],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+            ],
+            links: vec![LinkMapping {
+                link_type: "owned_by".into(),
+                target_object_type: "team".into(),
+                source_fields: vec!["team_id".into()],
+                target_identity_fields: vec!["id".into()],
+                missing_target: MissingTargetStrategy::Error,
+            }],
+            row_filter: None,
+        };
+        let team_plan = MappingPlan {
+            id: Uuid::new_v4(),
+            object_type: "team".into(),
+            identity_fields: vec!["team_id".into()],
+            fields: vec![
+                FieldMapping {
+                    source: "team_id".into(),
+                    target: "id".into(),
+                    transforms: vec![],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+                FieldMapping {
+                    source: "team_name".into(),
+                    target: "name".into(),
+                    transforms: vec![Transform::Trim],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+            ],
+            links: vec![],
+            row_filter: None,
+        };
+        let plans = vec![service_plan, team_plan];
+
+        let mapped = execute_source_mapping_bundle(
+            &plans,
+            SourceFormat::Json,
+            br#"[
+                {"service_id":"billing","service_name":" Billing API ","team_id":"payments","team_name":"Payments"},
+                {"service_id":"search","service_name":"Search API","team_id":"platform","team_name":"Platform"}
+            ]"#,
+        )
+        .await
+        .expect("a target produced by another plan satisfies the strict link strategy");
+
+        assert_eq!(
+            mapped.rows_read, 2,
+            "the shared source is counted only once"
+        );
+        assert_eq!(mapped.rows_rejected, 0);
+        assert_eq!(mapped.nodes.len(), 4);
+        assert_eq!(mapped.edges.len(), 2);
+        assert!(
+            mapped
+                .edges
+                .iter()
+                .all(|edge| edge.source_object_type == "service")
+        );
+        let payments = mapped
+            .nodes
+            .iter()
+            .find(|node| node.object_id == "team:payments")
+            .expect("the team plan creates the link target");
+        assert!(payments.properties_json.contains("Payments"));
+    }
+
+    #[test]
+    fn reads_legacy_plans_and_mapping_bundles() {
+        let plan = MappingPlan {
+            id: Uuid::new_v4(),
+            object_type: "service".into(),
+            identity_fields: vec!["id".into()],
+            fields: vec![],
+            links: vec![],
+            row_filter: None,
+        };
+        let legacy: MappingDocument =
+            serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+        assert_eq!(legacy.plans(), std::slice::from_ref(&plan));
+
+        let bundle = MappingBundle {
+            id: Uuid::new_v4(),
+            plans: vec![plan],
+        };
+        let document: MappingDocument =
+            serde_json::from_value(serde_json::to_value(&bundle).unwrap()).unwrap();
+        assert_eq!(document.plans(), bundle.plans);
     }
 }

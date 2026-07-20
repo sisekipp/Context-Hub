@@ -261,23 +261,30 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
   }
 
   function backendMapping() {
-    const objectMapping = objectMappings[0];
-    const objectType = ontology.objectTypes.find((type) => type.apiName === objectMapping?.objectType);
-    const identityProperty = objectType?.properties.find((property) => property.identity)?.apiName;
-    if (!dataSource || !objectMapping || !identityProperty) throw new Error("The primary object mapping needs an ontology identity property.");
-    const links = linkMappings.filter((link) => link.sourceObjectMappingId === objectMapping.id).map((link) => {
+    if (!dataSource || !objectMappings.length) throw new Error("Add at least one object mapping.");
+    const backendObjectMappings = objectMappings.map((objectMapping) => {
+      const objectType = ontology.objectTypes.find((type) => type.apiName === objectMapping.objectType);
+      const identityProperty = objectType?.properties.find((property) => property.identity)?.apiName;
+      if (!objectType || !identityProperty) throw new Error(`Object mapping '${objectMapping.objectType}' needs an ontology identity property.`);
+      if (!objectMapping.properties.some((property) => property.targetProperty === identityProperty)) {
+        throw new Error(`Object mapping '${objectType.displayName}' must map its identity property '${identityProperty}'.`);
+      }
+      return { objectType: objectMapping.objectType, identityProperty, properties: objectMapping.properties };
+    });
+    const links = linkMappings.map((link) => {
+      const sourceMapping = objectMappings.find((mapping) => mapping.id === link.sourceObjectMappingId);
       const linkType = linkForMapping(link, objectMappings, ontology);
       const targetType = ontology.objectTypes.find((type) => type.apiName === linkType?.targetType);
       const targetIdentityProperty = targetType?.properties.find((property) => property.identity)?.apiName;
-      if (!linkType || !targetType || !targetIdentityProperty) throw new Error(`Link mapping '${link.linkType}' has no valid target identity.`);
-      return { sourceField: link.sourceField, linkType: link.linkType, targetObjectType: targetType.apiName, targetIdentityProperty, missingTarget: link.missingTarget };
+      if (!sourceMapping || !linkType || !targetType || !targetIdentityProperty) throw new Error(`Link mapping '${link.linkType}' has no valid source or target identity.`);
+      return { sourceObjectType: sourceMapping.objectType, sourceField: link.sourceField, linkType: link.linkType, targetObjectType: targetType.apiName, targetIdentityProperty, missingTarget: link.missingTarget };
     });
     return {
       id: backendMappingId || undefined,
       ontologyId,
       dataSourceId: dataSource.id,
-      name: `${fileName} → ${objectType.displayName}`,
-      objectMapping: { objectType: objectMapping.objectType, identityProperty, properties: objectMapping.properties },
+      name: `${fileName} → ${backendObjectMappings.length} object type${backendObjectMappings.length === 1 ? "" : "s"}`,
+      objectMappings: backendObjectMappings,
       links,
     };
   }

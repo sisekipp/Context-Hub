@@ -21,7 +21,9 @@ use context_hub_api::context_hub::v1::{
 use context_hub_domain::{
     ObjectTypeDefinition, OntologyDefinition, PropertyDefinition, ScalarType, ValueType,
 };
-use context_hub_mapping::{MappingPlan, SourceFormat, execute_source_mapping};
+use context_hub_mapping::{
+    MappingDocument, MappingPlan, SourceFormat, execute_source_mapping_bundle,
+};
 use context_hub_storage::{
     ClickHouseControlPlaneRepository, ClickHouseGraphRepository, ControlPlaneRepository,
     ControlPlaneSnapshot, FilterOperator as StorageFilterOperator, GraphEdgeWrite,
@@ -452,14 +454,20 @@ impl Runtime {
         if checksum != configuration.sha256 {
             return Err("uploaded object checksum mismatch".into());
         }
-        let plan: MappingPlan = serde_json::from_str(&mapping.mapping_plan_json)
-            .map_err(|error| format!("mapping plan is invalid: {error}"))?;
+        let document: MappingDocument = serde_json::from_str(&mapping.mapping_plan_json)
+            .map_err(|error| format!("mapping document is invalid: {error}"))?;
+        document
+            .validate()
+            .map_err(|error| format!("mapping document is invalid: {error}"))?;
         let definition: OntologyDefinition = serde_json::from_str(&version.definition_json)
             .map_err(|error| format!("stored ontology version is invalid: {error}"))?;
-        validate_worker_plan(&plan, &definition)?;
-        let mapped = execute_source_mapping(&plan, configuration.format, &content)
-            .await
-            .map_err(|error| error.to_string())?;
+        for plan in document.plans() {
+            validate_worker_plan(plan, &definition)?;
+        }
+        let mapped =
+            execute_source_mapping_bundle(document.plans(), configuration.format, &content)
+                .await
+                .map_err(|error| error.to_string())?;
         let workspace_id = Uuid::parse_str(&source.workspace_id)
             .map_err(|error| format!("workspace id is invalid: {error}"))?;
         let ontology_version_id = Uuid::parse_str(&version.id)
@@ -498,7 +506,7 @@ impl Runtime {
                     .as_bytes(),
                 )
                 .to_string(),
-                source_type: plan.object_type.clone(),
+                source_type: edge.source_object_type.clone(),
                 source_id: edge.source_id.clone(),
                 target_type: edge.target_object_type.clone(),
                 target_id: edge.target_id.clone(),
@@ -1995,10 +2003,11 @@ mod tests {
     async fn assert_uploaded_json_pipeline(runtime: Runtime) -> (String, String, String, String) {
         let ontology_id =
             Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
+        let expected_revision = current_draft_revision(&runtime, &ontology_id).await;
         let version = runtime
             .publish(Request::new(PublishOntologyRequest {
                 ontology_id: ontology_id.clone(),
-                expected_revision: 0,
+                expected_revision,
             }))
             .await
             .expect("seed ontology can be published")
@@ -2089,5 +2098,15 @@ mod tests {
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].id, "service:billing");
         (source.id, mapping.id, version.id, completed.id)
+    }
+
+    async fn current_draft_revision(runtime: &Runtime, ontology_id: &str) -> u64 {
+        runtime
+            .drafts
+            .read()
+            .await
+            .get(ontology_id)
+            .expect("seed ontology exists")
+            .revision
     }
 }
