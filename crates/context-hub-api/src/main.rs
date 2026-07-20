@@ -112,6 +112,7 @@ impl Runtime {
                 .await?;
             if !snapshot.ontologies.is_empty() {
                 runtime.load_control_plane(snapshot).await?;
+                runtime.resume_ingestion_jobs().await;
                 return Ok(runtime);
             }
         }
@@ -436,6 +437,49 @@ impl Runtime {
         };
         if let Err(error) = self.persist_job(&completed).await {
             tracing::error!(%error, %job_id, "failed to persist completed ingestion job");
+        }
+    }
+
+    async fn resume_ingestion_jobs(&self) {
+        let recoverable = self
+            .jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| {
+                job.state == IngestionState::Queued as i32
+                    || job.state == IngestionState::Running as i32
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for job in recoverable {
+            match self
+                .ingestion_scope(
+                    &job.data_source_id,
+                    &job.ontology_mapping_id,
+                    &job.ontology_version_id,
+                )
+                .await
+            {
+                Ok((source, mapping, version)) => {
+                    let runtime = self.clone();
+                    tokio::spawn(async move {
+                        runtime
+                            .run_ingestion_job(job.id, source, mapping, version)
+                            .await;
+                    });
+                }
+                Err(error) => self.fail_unrecoverable_job(job, error.message()).await,
+            }
+        }
+    }
+
+    async fn fail_unrecoverable_job(&self, mut job: IngestionJob, reason: &str) {
+        job.state = IngestionState::Failed as i32;
+        job.error = format!("ingestion job could not be resumed: {reason}");
+        self.jobs.write().await.insert(job.id.clone(), job.clone());
+        if let Err(error) = self.persist_job(&job).await {
+            tracing::error!(%error, job_id = %job.id, "failed to persist unrecoverable ingestion job");
         }
     }
 
@@ -2016,7 +2060,67 @@ mod tests {
 
     #[tokio::test]
     async fn uploaded_json_runs_through_datafusion_into_the_graph() {
-        let _ = assert_uploaded_json_pipeline(Runtime::seeded().await).await;
+        let runtime = Runtime::seeded().await;
+        let _ = assert_uploaded_json_pipeline(&runtime).await;
+    }
+
+    #[tokio::test]
+    async fn resumes_interrupted_ingestion_jobs() {
+        let runtime = Runtime::seeded().await;
+        let (source, mapping, version) = prepare_uploaded_json_scope(&runtime).await;
+        let job = IngestionJob {
+            id: Uuid::new_v4().to_string(),
+            data_source_id: source.id,
+            state: IngestionState::Running as i32,
+            rows_read: 0,
+            nodes_written: 0,
+            edges_written: 0,
+            rows_rejected: 0,
+            error: String::new(),
+            ontology_mapping_id: mapping.id,
+            ontology_version_id: version.id,
+            workspace_id: source.workspace_id,
+        };
+        runtime
+            .jobs
+            .write()
+            .await
+            .insert(job.id.clone(), job.clone());
+
+        runtime.resume_ingestion_jobs().await;
+
+        let completed = wait_for_job(&runtime, job).await;
+        assert_eq!(completed.state, IngestionState::Succeeded as i32);
+        assert_eq!(completed.nodes_written, 1);
+    }
+
+    #[tokio::test]
+    async fn fails_jobs_that_cannot_be_resumed() {
+        let runtime = Runtime::seeded().await;
+        let job = IngestionJob {
+            id: Uuid::new_v4().to_string(),
+            data_source_id: Uuid::new_v4().to_string(),
+            state: IngestionState::Queued as i32,
+            rows_read: 0,
+            nodes_written: 0,
+            edges_written: 0,
+            rows_rejected: 0,
+            error: String::new(),
+            ontology_mapping_id: Uuid::new_v4().to_string(),
+            ontology_version_id: Uuid::new_v4().to_string(),
+            workspace_id: dev_workspace_id(),
+        };
+        runtime
+            .jobs
+            .write()
+            .await
+            .insert(job.id.clone(), job.clone());
+
+        runtime.resume_ingestion_jobs().await;
+
+        let failed = runtime.jobs.read().await.get(&job.id).cloned().unwrap();
+        assert_eq!(failed.state, IngestionState::Failed as i32);
+        assert!(failed.error.contains("could not be resumed"));
     }
 
     #[tokio::test]
@@ -2052,7 +2156,25 @@ mod tests {
         .await
         .expect("persistent runtime can be seeded");
         let (source_id, mapping_id, version_id, job_id) =
-            assert_uploaded_json_pipeline(runtime).await;
+            assert_uploaded_json_pipeline(&runtime).await;
+        let interrupted = IngestionJob {
+            id: Uuid::new_v4().to_string(),
+            data_source_id: source_id.clone(),
+            state: IngestionState::Running as i32,
+            rows_read: 0,
+            nodes_written: 0,
+            edges_written: 0,
+            rows_rejected: 0,
+            error: String::new(),
+            ontology_mapping_id: mapping_id.clone(),
+            ontology_version_id: version_id.clone(),
+            workspace_id: dev_workspace_id(),
+        };
+        runtime
+            .persist_job(&interrupted)
+            .await
+            .expect("interrupted job can be persisted");
+        drop(runtime);
 
         let reloaded = Runtime::seeded_with_stores(
             Arc::new(ClickHouseGraphRepository::new(clickhouse.clone())),
@@ -2064,6 +2186,9 @@ mod tests {
         assert!(reloaded.data_sources.read().await.contains_key(&source_id));
         assert!(reloaded.mappings.read().await.contains_key(&mapping_id));
         assert!(reloaded.jobs.read().await.contains_key(&job_id));
+        let recovered = wait_for_job(&reloaded, interrupted).await;
+        assert_eq!(recovered.state, IngestionState::Succeeded as i32);
+        assert_eq!(recovered.nodes_written, 1);
         assert!(
             reloaded
                 .versions
@@ -2075,10 +2200,33 @@ mod tests {
         );
     }
 
-    async fn assert_uploaded_json_pipeline(runtime: Runtime) -> (String, String, String, String) {
+    async fn assert_uploaded_json_pipeline(runtime: &Runtime) -> (String, String, String, String) {
+        let (source, mapping, version) = prepare_uploaded_json_scope(runtime).await;
+        let queued = runtime
+            .start(Request::new(StartIngestionRequest {
+                data_source_id: source.id.clone(),
+                ontology_mapping_id: mapping.id.clone(),
+                ontology_version_id: version.id.clone(),
+            }))
+            .await
+            .expect("ingestion can be queued")
+            .into_inner();
+        let completed = wait_for_job(runtime, queued).await;
+        assert_eq!(completed.state, IngestionState::Succeeded as i32);
+        assert_eq!(completed.nodes_written, 1);
+
+        let graph = query_service_page(runtime, &version.id, 10, String::new()).await;
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].id, "service:billing");
+        (source.id, mapping.id, version.id, completed.id)
+    }
+
+    async fn prepare_uploaded_json_scope(
+        runtime: &Runtime,
+    ) -> (DataSource, OntologyDataMapping, OntologyVersion) {
         let ontology_id =
             Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
-        let expected_revision = current_draft_revision(&runtime, &ontology_id).await;
+        let expected_revision = current_draft_revision(runtime, &ontology_id).await;
         let version = runtime
             .publish(Request::new(PublishOntologyRequest {
                 ontology_id: ontology_id.clone(),
@@ -2127,52 +2275,24 @@ mod tests {
             .await
             .expect("mapping can be saved")
             .into_inner();
-        let queued = runtime
-            .start(Request::new(StartIngestionRequest {
-                data_source_id: source.id.clone(),
-                ontology_mapping_id: mapping.id.clone(),
-                ontology_version_id: version.id.clone(),
-            }))
-            .await
-            .expect("ingestion can be queued")
-            .into_inner();
+        (source, mapping, version)
+    }
 
-        let mut completed = queued;
+    async fn wait_for_job(runtime: &Runtime, mut job: IngestionJob) -> IngestionJob {
         for _ in 0..500 {
-            completed = runtime
-                .get_job(Request::new(GetIngestionJobRequest {
-                    id: completed.id.clone(),
-                }))
+            job = runtime
+                .get_job(Request::new(GetIngestionJobRequest { id: job.id.clone() }))
                 .await
                 .expect("job can be polled")
                 .into_inner();
-            if completed.state == IngestionState::Succeeded as i32
-                || completed.state == IngestionState::Failed as i32
+            if job.state == IngestionState::Succeeded as i32
+                || job.state == IngestionState::Failed as i32
             {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(completed.state, IngestionState::Succeeded as i32);
-        assert_eq!(completed.nodes_written, 1);
-
-        let graph = runtime
-            .query(Request::new(GraphQuery {
-                workspace_id: dev_workspace_id(),
-                ontology_version_id: version.id.clone(),
-                root_type: "service".into(),
-                filters: vec![],
-                traversal: vec![],
-                projection: vec![],
-                limit: 10,
-                cursor: String::new(),
-            }))
-            .await
-            .expect("worker output can be queried")
-            .into_inner();
-        assert_eq!(graph.nodes.len(), 1);
-        assert_eq!(graph.nodes[0].id, "service:billing");
-        (source.id, mapping.id, version.id, completed.id)
+        job
     }
 
     async fn current_draft_revision(runtime: &Runtime, ontology_id: &str) -> u64 {
