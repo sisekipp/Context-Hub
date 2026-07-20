@@ -1,0 +1,62 @@
+# Version control and local editor state
+.git
+.gitignore
+.gitattributes
+.github
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Local configuration and secrets
+.env
+.env.*
+*.pem
+.mise.toml
+.mise.local.toml
+
+# JavaScript dependencies, caches, and build output
+node_modules
+**/node_modules
+.pnpm-store
+**/.pnpm-store
+.next
+**/.next
+.turbo
+**/.turbo
+.cache
+**/.cache
+out
+**/out
+dist
+**/dist
+build
+**/build
+coverage
+**/coverage
+playwright-report
+test-results
+*.tsbuildinfo
+
+# Rust build output
+target
+**/target
+
+# Generated code and large local samples
+apps/web/src/gen
+samples/*.json
+
+# Logs, temporary files, and local data stores
+*.log
+tmp
+**/tmp
+temp
+**/temp
+*.db
+*.db-shm
+*.db-wal
+
+# Docker Compose does not need project documentation in the image context
+docs
+*.md
+LICENSE*

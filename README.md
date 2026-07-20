@@ -11,6 +11,8 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - Optimistic draft revisions and immutable publish versions in the gRPC service.
 - A declarative `MappingPlan` compiled into safe Apache DataFusion SQL expressions.
 - Bounded, tenant-scoped graph query compilation into parameterized ClickHouse SQL.
+- Ontology-version-scoped graph batch ingestion with stable node/edge IDs and persistent ClickHouse storage.
+- A working `GraphService` for bounded node queries, traversals, edge results, and single-object lookup.
 - A unified ClickHouse schema for control-plane metadata and property-graph data.
 - gRPC and gRPC-Web contracts for workspaces, ontologies, data sources, ingestion, and graph queries.
 - Read-only MCP tools for schema discovery and graph access.
@@ -59,6 +61,6 @@ infra/                      ClickHouse bootstrap schema
 
 Actions, scenarios, GeoPoint/GeoShape, Attachment/MediaReference, status/render metadata, write-capable MCP tools, direct database connectors, and arbitrary user SQL are deliberately excluded. Functions are included as read-only expression, external gRPC, or WASM definitions. ConnectorX is reserved for a later direct-database connector milestone.
 
-The current browser vertical slice parses JSON, NDJSON, and CSV locally and passes the resulting objects and links directly to the explorer. The Rust Arrow/DataFusion and ClickHouse components are present, but durable upload/job/reload wiring remains a production integration; refreshing the browser clears an imported graph.
+The current browser vertical slice parses JSON, NDJSON, and CSV locally and passes the resulting objects and links directly to the explorer. The backend now accepts validated, already-mapped graph batches through `IngestionService.ImportGraph` and persists them in ClickHouse. Connecting the browser upload flow to MinIO, DataFusion, and this worker boundary remains an integration step; refreshing the browser still clears a graph imported only through the local UI path.
 
-Each ontology currently keeps its own local editor draft, mapping draft, and in-session explorer graph. Shared-source persistence and durable per-ontology graph imports are the next integration step.
+Each ontology currently keeps its own local editor draft, mapping draft, and in-session explorer graph. The next integration step is persistent shared-source upload plus backend execution of the ontology-specific mapping plan.

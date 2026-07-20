@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS context_hub.ingestion_jobs (
   id UUID,
   workspace_id UUID,
   data_source_id UUID,
+  ontology_mapping_id UUID,
+  ontology_version_id UUID,
   state Enum8('queued' = 1, 'running' = 2, 'succeeded' = 3, 'failed' = 4, 'cancelled' = 5),
   stats_json String DEFAULT '{}',
   error String DEFAULT '',

@@ -151,6 +151,7 @@ message IngestionJob {
   string error = 8;
   string ontology_mapping_id = 9;
   string ontology_version_id = 10;
+  string workspace_id = 11;
 }
 message StartIngestionRequest {
   string data_source_id = 1;
@@ -159,8 +160,19 @@ message StartIngestionRequest {
 }
 message GetIngestionJobRequest { string id = 1; }
 
+// Internal worker boundary: records have already been validated and transformed by the
+// MappingPlan/DataFusion pipeline before this bounded graph batch is persisted.
+message ImportGraphRequest {
+  string data_source_id = 1;
+  string ontology_mapping_id = 2;
+  string ontology_version_id = 3;
+  repeated GraphNode nodes = 4;
+  repeated GraphEdge edges = 5;
+}
+
 service IngestionService {
   rpc Start(StartIngestionRequest) returns (IngestionJob);
+  rpc ImportGraph(ImportGraphRequest) returns (IngestionJob);
   rpc GetJob(GetIngestionJobRequest) returns (IngestionJob);
 }
 

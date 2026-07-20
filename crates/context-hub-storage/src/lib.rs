@@ -1,10 +1,15 @@
-use std::fmt::Write as _;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use context_hub_domain::OntologyDraft;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::{io::AsyncWriteExt, sync::RwLock};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,14 +89,14 @@ pub fn compile_graph_query(query: &GraphQuery) -> Result<CompiledGraphQuery, Que
         validate_graph_identifier(&step.target_type)?;
         let edge = format!("e{}", index + 1);
         let next = format!("n{}", index + 1);
-        let (from, to) = if step.reverse {
-            ("target_id", "source_id")
+        let (from, to, from_type) = if step.reverse {
+            ("target_id", "source_id", "target_type")
         } else {
-            ("source_id", "target_id")
+            ("source_id", "target_id", "source_type")
         };
-        write!(&mut joins, " JOIN graph_edges FINAL AS {edge} ON {edge}.workspace_id = {current}.workspace_id AND {edge}.ontology_version_id = {current}.ontology_version_id AND {edge}.{from} = {current}.object_id AND {edge}.link_type = ? AND {edge}.deleted = false")
+        write!(&mut joins, " JOIN graph_edges AS {edge} FINAL ON {edge}.workspace_id = {current}.workspace_id AND {edge}.ontology_version_id = {current}.ontology_version_id AND {edge}.{from} = {current}.object_id AND {edge}.{from_type} = {current}.object_type AND {edge}.link_type = ? AND {edge}.deleted = false")
             .expect("writing to a String cannot fail");
-        write!(&mut joins, " JOIN graph_nodes FINAL AS {next} ON {next}.workspace_id = {edge}.workspace_id AND {next}.ontology_version_id = {edge}.ontology_version_id AND {next}.object_id = {edge}.{to} AND {next}.object_type = ? AND {next}.deleted = false")
+        write!(&mut joins, " JOIN graph_nodes AS {next} FINAL ON {next}.workspace_id = {edge}.workspace_id AND {next}.ontology_version_id = {edge}.ontology_version_id AND {next}.object_id = {edge}.{to} AND {next}.object_type = ? AND {next}.deleted = false")
             .expect("writing to a String cannot fail");
         parameters.push(step.link_type.clone());
         parameters.push(step.target_type.clone());
@@ -127,7 +132,7 @@ pub fn compile_graph_query(query: &GraphQuery) -> Result<CompiledGraphQuery, Que
         });
     }
     let sql = format!(
-        "SELECT {current}.object_id, {current}.object_type, toJSONString({current}.properties) FROM graph_nodes FINAL AS n0{joins} WHERE n0.workspace_id = ? AND n0.ontology_version_id = ? AND n0.object_type = ? AND n0.deleted = false{filters} ORDER BY {current}.object_id LIMIT {limit}"
+        "SELECT {current}.object_id, {current}.object_type, toJSONString({current}.properties) FROM graph_nodes AS n0 FINAL{joins} WHERE n0.workspace_id = ? AND n0.ontology_version_id = ? AND n0.object_type = ? AND n0.deleted = false{filters} ORDER BY {current}.object_id LIMIT {limit}"
     );
     Ok(CompiledGraphQuery { sql, parameters })
 }
@@ -153,6 +158,8 @@ fn validate_graph_identifier(value: &str) -> Result<(), QueryError> {
 pub enum StorageError {
     #[error("ClickHouse store error: {0}")]
     ClickHouse(#[from] clickhouse::error::Error),
+    #[error("I/O error while writing to the store: {0}")]
+    Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("stored record is invalid: {0}")]
@@ -262,6 +269,73 @@ pub struct StoredNode {
     pub properties_json: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredEdge {
+    pub workspace_id: Uuid,
+    pub ontology_version_id: Uuid,
+    pub link_type: String,
+    pub edge_id: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub properties_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphNodeWrite {
+    pub workspace_id: Uuid,
+    pub ontology_version_id: Uuid,
+    pub object_type: String,
+    pub object_id: String,
+    pub source_id: Uuid,
+    pub external_id: String,
+    pub properties_json: String,
+    pub version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdgeWrite {
+    pub workspace_id: Uuid,
+    pub ontology_version_id: Uuid,
+    pub link_type: String,
+    pub edge_id: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub data_source_id: Uuid,
+    pub properties_json: String,
+    pub version: u64,
+}
+
+#[async_trait]
+pub trait GraphRepository: Send + Sync {
+    async fn write_graph(
+        &self,
+        nodes: &[GraphNodeWrite],
+        edges: &[GraphEdgeWrite],
+    ) -> Result<(), StorageError>;
+
+    async fn query_nodes(&self, query: &GraphQuery) -> Result<Vec<StoredNode>, StorageError>;
+
+    async fn get_node(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        object_type: &str,
+        object_id: &str,
+    ) -> Result<StoredNode, StorageError>;
+
+    async fn edges_between(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        object_ids: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredEdge>, StorageError>;
+}
+
 #[derive(Clone)]
 pub struct ClickHouseGraphRepository {
     client: clickhouse::Client,
@@ -278,7 +352,72 @@ impl ClickHouseGraphRepository {
     ///
     /// Returns [`StorageError::NotFound`] when no node matches, or a backend error when the
     /// `ClickHouse` request fails.
-    pub async fn get_node(
+    async fn insert_nodes(&self, nodes: &[GraphNodeWrite]) -> Result<(), StorageError> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        let mut body = String::new();
+        for node in nodes {
+            let properties = parse_properties(&node.properties_json)?;
+            body.push_str(&serde_json::to_string(&serde_json::json!({
+                "workspace_id": node.workspace_id,
+                "ontology_version_id": node.ontology_version_id,
+                "object_type": node.object_type,
+                "object_id": node.object_id,
+                "source_id": node.source_id,
+                "external_id": node.external_id,
+                "properties": properties,
+                "version": node.version,
+                "deleted": false
+            }))?);
+            body.push('\n');
+        }
+        let mut insert = self
+            .client
+            .insert_formatted_with(
+                "INSERT INTO graph_nodes (workspace_id, ontology_version_id, object_type, object_id, source_id, external_id, properties, version, deleted) FORMAT JSONEachRow",
+            )
+            .buffered();
+        insert.write_all(body.as_bytes()).await?;
+        insert.end().await?;
+        Ok(())
+    }
+
+    async fn insert_edges(&self, edges: &[GraphEdgeWrite]) -> Result<(), StorageError> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let mut body = String::new();
+        for edge in edges {
+            let properties = parse_properties(&edge.properties_json)?;
+            body.push_str(&serde_json::to_string(&serde_json::json!({
+                "workspace_id": edge.workspace_id,
+                "ontology_version_id": edge.ontology_version_id,
+                "link_type": edge.link_type,
+                "edge_id": edge.edge_id,
+                "source_type": edge.source_type,
+                "source_id": edge.source_id,
+                "target_type": edge.target_type,
+                "target_id": edge.target_id,
+                "data_source_id": edge.data_source_id,
+                "properties": properties,
+                "version": edge.version,
+                "deleted": false
+            }))?);
+            body.push('\n');
+        }
+        let mut insert = self
+            .client
+            .insert_formatted_with(
+                "INSERT INTO graph_edges (workspace_id, ontology_version_id, link_type, edge_id, source_type, source_id, target_type, target_id, data_source_id, properties, version, deleted) FORMAT JSONEachRow",
+            )
+            .buffered();
+        insert.write_all(body.as_bytes()).await?;
+        insert.end().await?;
+        Ok(())
+    }
+
+    async fn fetch_node(
         &self,
         workspace_id: Uuid,
         ontology_version_id: Uuid,
@@ -298,6 +437,300 @@ impl ClickHouseGraphRepository {
             properties_json: row.4,
         })
     }
+}
+
+#[async_trait]
+impl GraphRepository for ClickHouseGraphRepository {
+    async fn write_graph(
+        &self,
+        nodes: &[GraphNodeWrite],
+        edges: &[GraphEdgeWrite],
+    ) -> Result<(), StorageError> {
+        self.insert_nodes(nodes).await?;
+        self.insert_edges(edges).await
+    }
+
+    async fn query_nodes(&self, query: &GraphQuery) -> Result<Vec<StoredNode>, StorageError> {
+        let compiled = compile_graph_query(query)
+            .map_err(|error| StorageError::InvalidRecord(error.to_string()))?;
+        let mut clickhouse_query = self.client.query(&compiled.sql);
+        for parameter in compiled.parameters {
+            clickhouse_query = clickhouse_query.bind(parameter);
+        }
+        clickhouse_query
+            .fetch_all::<(String, String, String)>()
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(StoredNode {
+                    workspace_id: query.workspace_id,
+                    ontology_version_id: query.ontology_version_id,
+                    object_id: row.0,
+                    object_type: row.1,
+                    properties_json: row.2,
+                })
+            })
+            .collect()
+    }
+
+    async fn get_node(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        object_type: &str,
+        object_id: &str,
+    ) -> Result<StoredNode, StorageError> {
+        self.fetch_node(workspace_id, ontology_version_id, object_type, object_id)
+            .await
+    }
+
+    async fn edges_between(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        object_ids: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredEdge>, StorageError> {
+        if object_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders = std::iter::repeat_n("?", object_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT link_type, edge_id, source_type, source_id, target_type, target_id, toJSONString(properties) FROM graph_edges FINAL WHERE workspace_id = ? AND ontology_version_id = ? AND deleted = false AND source_id IN ({placeholders}) AND target_id IN ({placeholders}) ORDER BY edge_id LIMIT {}",
+            limit.min(20_000)
+        );
+        let mut query = self
+            .client
+            .query(&sql)
+            .bind(workspace_id.to_string())
+            .bind(ontology_version_id.to_string());
+        for object_id in object_ids.iter().chain(object_ids) {
+            query = query.bind(object_id);
+        }
+        query
+            .fetch_all::<(String, String, String, String, String, String, String)>()
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(StoredEdge {
+                    workspace_id,
+                    ontology_version_id,
+                    link_type: row.0,
+                    edge_id: row.1,
+                    source_type: row.2,
+                    source_id: row.3,
+                    target_type: row.4,
+                    target_id: row.5,
+                    properties_json: row.6,
+                })
+            })
+            .collect()
+    }
+}
+
+fn parse_properties(value: &str) -> Result<serde_json::Value, StorageError> {
+    let value: serde_json::Value = serde_json::from_str(value)?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(StorageError::InvalidRecord(
+            "graph properties must be a JSON object".into(),
+        ))
+    }
+}
+
+type MemoryNodeKey = (Uuid, Uuid, String, String);
+type MemoryEdgeKey = (Uuid, Uuid, String);
+
+#[derive(Clone, Default)]
+pub struct MemoryGraphRepository {
+    nodes: Arc<RwLock<HashMap<MemoryNodeKey, GraphNodeWrite>>>,
+    edges: Arc<RwLock<HashMap<MemoryEdgeKey, GraphEdgeWrite>>>,
+}
+
+#[async_trait]
+impl GraphRepository for MemoryGraphRepository {
+    async fn write_graph(
+        &self,
+        nodes: &[GraphNodeWrite],
+        edges: &[GraphEdgeWrite],
+    ) -> Result<(), StorageError> {
+        let mut stored_nodes = self.nodes.write().await;
+        for node in nodes {
+            parse_properties(&node.properties_json)?;
+            stored_nodes.insert(
+                (
+                    node.workspace_id,
+                    node.ontology_version_id,
+                    node.object_type.clone(),
+                    node.object_id.clone(),
+                ),
+                node.clone(),
+            );
+        }
+        drop(stored_nodes);
+        let mut stored_edges = self.edges.write().await;
+        for edge in edges {
+            parse_properties(&edge.properties_json)?;
+            stored_edges.insert(
+                (
+                    edge.workspace_id,
+                    edge.ontology_version_id,
+                    edge.edge_id.clone(),
+                ),
+                edge.clone(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn query_nodes(&self, query: &GraphQuery) -> Result<Vec<StoredNode>, StorageError> {
+        compile_graph_query(query)
+            .map_err(|error| StorageError::InvalidRecord(error.to_string()))?;
+        let nodes = self.nodes.read().await;
+        let edges = self.edges.read().await;
+        let mut current = nodes
+            .values()
+            .filter(|node| {
+                node.workspace_id == query.workspace_id
+                    && node.ontology_version_id == query.ontology_version_id
+                    && node.object_type == query.root_type
+                    && matches_filters(&node.properties_json, &query.filters)
+            })
+            .map(|node| node.object_id.clone())
+            .collect::<HashSet<_>>();
+        for step in &query.traversal {
+            let mut next = HashSet::new();
+            for edge in edges.values().filter(|edge| {
+                edge.workspace_id == query.workspace_id
+                    && edge.ontology_version_id == query.ontology_version_id
+                    && edge.link_type == step.link_type
+            }) {
+                let (from, to) = if step.reverse {
+                    (&edge.target_id, &edge.source_id)
+                } else {
+                    (&edge.source_id, &edge.target_id)
+                };
+                if current.contains(from)
+                    && nodes.values().any(|node| {
+                        node.workspace_id == query.workspace_id
+                            && node.ontology_version_id == query.ontology_version_id
+                            && node.object_type == step.target_type
+                            && node.object_id == *to
+                    })
+                {
+                    next.insert(to.clone());
+                }
+            }
+            current = next;
+        }
+        let mut result = nodes
+            .values()
+            .filter(|node| {
+                node.workspace_id == query.workspace_id
+                    && node.ontology_version_id == query.ontology_version_id
+                    && current.contains(&node.object_id)
+            })
+            .map(stored_node_from_write)
+            .collect::<Vec<_>>();
+        result.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+        let limit = if query.limit == 0 { 500 } else { query.limit };
+        result.truncate(limit.min(5_000) as usize);
+        Ok(result)
+    }
+
+    async fn get_node(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        object_type: &str,
+        object_id: &str,
+    ) -> Result<StoredNode, StorageError> {
+        self.nodes
+            .read()
+            .await
+            .get(&(
+                workspace_id,
+                ontology_version_id,
+                object_type.to_owned(),
+                object_id.to_owned(),
+            ))
+            .map(stored_node_from_write)
+            .ok_or(StorageError::NotFound)
+    }
+
+    async fn edges_between(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        object_ids: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredEdge>, StorageError> {
+        let ids = object_ids.iter().collect::<HashSet<_>>();
+        let mut result = self
+            .edges
+            .read()
+            .await
+            .values()
+            .filter(|edge| {
+                edge.workspace_id == workspace_id
+                    && edge.ontology_version_id == ontology_version_id
+                    && ids.contains(&edge.source_id)
+                    && ids.contains(&edge.target_id)
+            })
+            .map(|edge| StoredEdge {
+                workspace_id,
+                ontology_version_id,
+                link_type: edge.link_type.clone(),
+                edge_id: edge.edge_id.clone(),
+                source_type: edge.source_type.clone(),
+                source_id: edge.source_id.clone(),
+                target_type: edge.target_type.clone(),
+                target_id: edge.target_id.clone(),
+                properties_json: edge.properties_json.clone(),
+            })
+            .collect::<Vec<_>>();
+        result.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
+        result.truncate(limit.min(20_000) as usize);
+        Ok(result)
+    }
+}
+
+fn stored_node_from_write(node: &GraphNodeWrite) -> StoredNode {
+    StoredNode {
+        workspace_id: node.workspace_id,
+        ontology_version_id: node.ontology_version_id,
+        object_type: node.object_type.clone(),
+        object_id: node.object_id.clone(),
+        properties_json: node.properties_json.clone(),
+    }
+}
+
+fn matches_filters(properties_json: &str, filters: &[GraphFilter]) -> bool {
+    let Ok(properties) = serde_json::from_str::<serde_json::Value>(properties_json) else {
+        return false;
+    };
+    filters.iter().all(|filter| {
+        let actual = properties.get(&filter.property);
+        let actual_string = actual.map_or_else(String::new, json_scalar_string);
+        match filter.operator {
+            FilterOperator::Equal => actual_string == filter.value,
+            FilterOperator::NotEqual => actual_string != filter.value,
+            FilterOperator::Contains => actual_string
+                .to_lowercase()
+                .contains(&filter.value.to_lowercase()),
+            FilterOperator::GreaterThan => actual_string > filter.value,
+            FilterOperator::LessThan => actual_string < filter.value,
+        }
+    })
+}
+
+fn json_scalar_string(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_owned)
 }
 
 #[cfg(test)]
@@ -348,5 +781,106 @@ mod tests {
             compile_graph_query(&query),
             Err(QueryError::TraversalTooDeep(7))
         ));
+    }
+
+    #[tokio::test]
+    async fn clickhouse_graph_round_trip() {
+        if std::env::var("CONTEXT_HUB_CLICKHOUSE_TEST").as_deref() != Ok("1") {
+            return;
+        }
+        let client = clickhouse::Client::default()
+            .with_url(
+                std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".into()),
+            )
+            .with_database("context_hub")
+            .with_user("context_hub")
+            .with_password("context_hub")
+            .with_setting("input_format_binary_read_json_as_string", "1")
+            .with_setting("output_format_binary_write_json_as_string", "1");
+        let repository = ClickHouseGraphRepository::new(client);
+        let workspace_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let ontology_version_id = Uuid::new_v4();
+        let source_id = Uuid::new_v4();
+        repository
+            .write_graph(
+                &[
+                    GraphNodeWrite {
+                        workspace_id,
+                        ontology_version_id,
+                        object_type: "service".into(),
+                        object_id: "service:test".into(),
+                        source_id,
+                        external_id: "test".into(),
+                        properties_json: r#"{"name":"Test"}"#.into(),
+                        version: 1,
+                    },
+                    GraphNodeWrite {
+                        workspace_id,
+                        ontology_version_id,
+                        object_type: "team".into(),
+                        object_id: "team:platform".into(),
+                        source_id,
+                        external_id: "platform".into(),
+                        properties_json: r#"{"name":"Platform"}"#.into(),
+                        version: 1,
+                    },
+                ],
+                &[GraphEdgeWrite {
+                    workspace_id,
+                    ontology_version_id,
+                    link_type: "owned_by".into(),
+                    edge_id: "owned_by:test:platform".into(),
+                    source_type: "service".into(),
+                    source_id: "service:test".into(),
+                    target_type: "team".into(),
+                    target_id: "team:platform".into(),
+                    data_source_id: source_id,
+                    properties_json: "{}".into(),
+                    version: 1,
+                }],
+            )
+            .await
+            .expect("graph batch can be written to ClickHouse");
+
+        let nodes = repository
+            .query_nodes(&GraphQuery {
+                workspace_id,
+                ontology_version_id,
+                root_type: "service".into(),
+                filters: vec![],
+                traversal: vec![],
+                limit: 10,
+            })
+            .await
+            .expect("nodes can be queried from ClickHouse");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].object_id, "service:test");
+        let traversed = repository
+            .query_nodes(&GraphQuery {
+                workspace_id,
+                ontology_version_id,
+                root_type: "service".into(),
+                filters: vec![],
+                traversal: vec![TraversalStep {
+                    link_type: "owned_by".into(),
+                    target_type: "team".into(),
+                    reverse: false,
+                }],
+                limit: 10,
+            })
+            .await
+            .expect("ClickHouse traversal can be queried");
+        assert_eq!(traversed.len(), 1);
+        assert_eq!(traversed[0].object_id, "team:platform");
+        let edges = repository
+            .edges_between(
+                workspace_id,
+                ontology_version_id,
+                &["service:test".into(), "team:platform".into()],
+                10,
+            )
+            .await
+            .expect("edges can be queried from ClickHouse");
+        assert_eq!(edges.len(), 1);
     }
 }

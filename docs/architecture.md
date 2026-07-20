@@ -20,6 +20,8 @@ A workspace can contain many independent ontologies. Data sources belong to the 
 
 Published graph data is scoped by both `workspace_id` and `ontology_version_id`. Changing the active ontology changes the editor, mappings, ingestion jobs, and graph explorer together. Cross-ontology links are not created implicitly; an explicit future federation feature would be required for those.
 
+`IngestionService.ImportGraph` is the bounded worker-to-storage boundary. It accepts at most 5,000 mapped nodes and 20,000 mapped edges per request, verifies that source, mapping, ontology, workspace, and immutable ontology version belong together, validates every object/link type against that version, and then writes JSONEachRow batches to ClickHouse. Repeated stable IDs are handled by the versioned `ReplacingMergeTree` tables.
+
 ## Storage
 
 ClickHouse is the unified control and data plane. Revisioned `ReplacingMergeTree` tables store workspaces, drafts, versions, workspace-level data-source definitions, ontology-specific mapping plans, credential envelopes, and ingestion jobs. The same database stores versioned nodes, edges, typed property indices, and ingestion events. Graph sort keys begin with `workspace_id` and `ontology_version_id`. API callers never receive raw SQL access.
@@ -38,4 +40,4 @@ Uploads are addressed through Apache Arrow's `object_store` abstraction. MinIO i
 
 ## Remaining production integrations
 
-The vertical slice intentionally keeps persistence wiring replaceable. Before production deployment, connect the gRPC runtime to `ClickHouseOntologyRepository` and `ClickHouseGraphRepository`, implement the ingestion worker's job claim loop, add credential-envelope encryption, and enable the configured production JWT validator.
+The gRPC runtime now uses `ClickHouseGraphRepository` for graph writes and reads. Before production deployment, connect ontology, data-source, mapping, and job metadata to their ClickHouse repositories, implement MinIO-backed upload and the ingestion worker's DataFusion job loop, add credential-envelope encryption, cursor pagination, typed property-index writes, and the configured production JWT validator.

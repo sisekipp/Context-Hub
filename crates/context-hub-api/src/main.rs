@@ -3,14 +3,15 @@ use std::{collections::HashMap, fmt::Write as _, net::SocketAddr, sync::Arc};
 use chrono::Utc;
 use context_hub_api::context_hub::v1::{
     CreateOntologyRequest, DataSource, GetIngestionJobRequest, GetObjectRequest,
-    GetOntologyDraftRequest, GetWorkspaceRequest, GraphNode, GraphQuery, IngestionJob,
-    IngestionState, ListDataSourcesRequest, ListDataSourcesResponse, ListOntologiesRequest,
-    ListOntologiesResponse, ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse,
-    ListOntologyVersionsRequest, ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology,
-    OntologyDataMapping, OntologyDraft, OntologyVersion, PublishOntologyRequest,
-    QueryGraphResponse, SaveDataSourceRequest, SaveOntologyDataMappingRequest,
-    SaveOntologyDraftRequest, StartIngestionRequest, ValidateOntologyRequest,
-    ValidateOntologyResponse, ValidationIssue, Workspace,
+    GetOntologyDraftRequest, GetWorkspaceRequest, GraphEdge, GraphNode, GraphQuery,
+    ImportGraphRequest, IngestionJob, IngestionState, ListDataSourcesRequest,
+    ListDataSourcesResponse, ListOntologiesRequest, ListOntologiesResponse,
+    ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse, ListOntologyVersionsRequest,
+    ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology, OntologyDataMapping,
+    OntologyDraft, OntologyVersion, PublishOntologyRequest, QueryGraphResponse,
+    SaveDataSourceRequest, SaveOntologyDataMappingRequest, SaveOntologyDraftRequest,
+    StartIngestionRequest, ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue,
+    Workspace,
     data_source_service_server::{DataSourceService, DataSourceServiceServer},
     graph_service_server::{GraphService, GraphServiceServer},
     ingestion_service_server::{IngestionService, IngestionServiceServer},
@@ -20,6 +21,13 @@ use context_hub_api::context_hub::v1::{
 use context_hub_domain::{
     ObjectTypeDefinition, OntologyDefinition, PropertyDefinition, ScalarType, ValueType,
 };
+#[cfg(test)]
+use context_hub_storage::MemoryGraphRepository;
+use context_hub_storage::{
+    ClickHouseGraphRepository, FilterOperator as StorageFilterOperator, GraphEdgeWrite,
+    GraphFilter as StorageGraphFilter, GraphNodeWrite, GraphQuery as StorageGraphQuery,
+    GraphRepository, StorageError, TraversalStep as StorageTraversalStep,
+};
 use prost_types::Timestamp;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -27,7 +35,7 @@ use tonic::{Request, Response, Status, transport::Server};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Runtime {
     ontologies: Arc<RwLock<HashMap<String, Ontology>>>,
     drafts: Arc<RwLock<HashMap<String, OntologyDraft>>>,
@@ -35,11 +43,25 @@ struct Runtime {
     data_sources: Arc<RwLock<HashMap<String, DataSource>>>,
     mappings: Arc<RwLock<HashMap<String, OntologyDataMapping>>>,
     jobs: Arc<RwLock<HashMap<String, IngestionJob>>>,
+    graph: Arc<dyn GraphRepository>,
 }
 
 impl Runtime {
+    #[cfg(test)]
     async fn seeded() -> Self {
-        let runtime = Self::default();
+        Self::seeded_with_graph(Arc::new(MemoryGraphRepository::default())).await
+    }
+
+    async fn seeded_with_graph(graph: Arc<dyn GraphRepository>) -> Self {
+        let runtime = Self {
+            ontologies: Arc::default(),
+            drafts: Arc::default(),
+            versions: Arc::default(),
+            data_sources: Arc::default(),
+            mappings: Arc::default(),
+            jobs: Arc::default(),
+            graph,
+        };
         let ontology_id =
             Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
         let definition = OntologyDefinition {
@@ -101,6 +123,76 @@ impl Runtime {
             },
         );
         runtime
+    }
+
+    async fn ingestion_scope(
+        &self,
+        data_source_id: &str,
+        mapping_id: &str,
+        ontology_version_id: &str,
+    ) -> Result<(DataSource, OntologyDataMapping, OntologyVersion), Status> {
+        let source = self
+            .data_sources
+            .read()
+            .await
+            .get(data_source_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("data source not found"))?;
+        let mapping = self
+            .mappings
+            .read()
+            .await
+            .get(mapping_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("ontology mapping not found"))?;
+        if mapping.data_source_id != source.id {
+            return Err(Status::invalid_argument(
+                "mapping does not belong to the selected data source",
+            ));
+        }
+        if mapping.workspace_id != source.workspace_id || source.workspace_id != dev_workspace_id()
+        {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        let version = self
+            .versions
+            .read()
+            .await
+            .get(&mapping.ontology_id)
+            .and_then(|versions| {
+                versions
+                    .iter()
+                    .find(|version| version.id == ontology_version_id)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                Status::failed_precondition(
+                    "ontology version does not belong to the mapping ontology",
+                )
+            })?;
+        Ok((source, mapping, version))
+    }
+
+    async fn ontology_version(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+    ) -> Result<OntologyVersion, Status> {
+        if workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        let ontologies = self.ontologies.read().await;
+        let versions = self.versions.read().await;
+        versions
+            .iter()
+            .find_map(|(ontology_id, candidates)| {
+                let ontology = ontologies.get(ontology_id)?;
+                (ontology.workspace_id == workspace_id)
+                    .then(|| candidates.iter().find(|version| version.id == version_id))
+                    .flatten()
+                    .cloned()
+            })
+            .ok_or_else(|| Status::not_found("ontology version not found"))
     }
 }
 
@@ -444,29 +536,13 @@ impl IngestionService for Runtime {
         request: Request<StartIngestionRequest>,
     ) -> Result<Response<IngestionJob>, Status> {
         let request = request.into_inner();
-        if !self
-            .data_sources
-            .read()
-            .await
-            .contains_key(&request.data_source_id)
-        {
-            return Err(Status::not_found("data source not found"));
-        }
-        let mapping = self
-            .mappings
-            .read()
-            .await
-            .get(&request.ontology_mapping_id)
-            .cloned()
-            .ok_or_else(|| Status::not_found("ontology mapping not found"))?;
-        if mapping.data_source_id != request.data_source_id {
-            return Err(Status::invalid_argument(
-                "mapping does not belong to the selected data source",
-            ));
-        }
-        if request.ontology_version_id.is_empty() {
-            return Err(Status::invalid_argument("ontology_version_id is required"));
-        }
+        let (source, _, _) = self
+            .ingestion_scope(
+                &request.data_source_id,
+                &request.ontology_mapping_id,
+                &request.ontology_version_id,
+            )
+            .await?;
         let job = IngestionJob {
             id: Uuid::new_v4().to_string(),
             data_source_id: request.data_source_id,
@@ -478,10 +554,111 @@ impl IngestionService for Runtime {
             error: String::new(),
             ontology_mapping_id: request.ontology_mapping_id,
             ontology_version_id: request.ontology_version_id,
+            workspace_id: source.workspace_id,
         };
         self.jobs.write().await.insert(job.id.clone(), job.clone());
         Ok(Response::new(job))
     }
+
+    async fn import_graph(
+        &self,
+        request: Request<ImportGraphRequest>,
+    ) -> Result<Response<IngestionJob>, Status> {
+        let request = request.into_inner();
+        if request.nodes.len() > 5_000 || request.edges.len() > 20_000 {
+            return Err(Status::resource_exhausted(
+                "one graph batch supports at most 5000 nodes and 20000 edges",
+            ));
+        }
+        let (source, mapping, version) = self
+            .ingestion_scope(
+                &request.data_source_id,
+                &request.ontology_mapping_id,
+                &request.ontology_version_id,
+            )
+            .await?;
+        let definition: OntologyDefinition = serde_json::from_str(&version.definition_json)
+            .map_err(|error| Status::internal(format!("stored ontology is invalid: {error}")))?;
+        let workspace_id = parse_uuid(&source.workspace_id, "workspace_id")?;
+        let ontology_version_id = parse_uuid(&version.id, "ontology_version_id")?;
+        let data_source_id = parse_uuid(&source.id, "data_source_id")?;
+        let write_version = u64::try_from(Utc::now().timestamp_micros())
+            .map_err(|_| Status::internal("system clock predates the Unix epoch"))?;
+
+        let mut nodes = Vec::with_capacity(request.nodes.len());
+        for node in &request.nodes {
+            validate_graph_node(node, &definition)?;
+            nodes.push(GraphNodeWrite {
+                workspace_id,
+                ontology_version_id,
+                object_type: node.object_type.clone(),
+                object_id: node.id.clone(),
+                source_id: data_source_id,
+                external_id: node.id.clone(),
+                properties_json: node.properties_json.clone(),
+                version: write_version,
+            });
+        }
+        let mut edges = Vec::with_capacity(request.edges.len());
+        for edge in &request.edges {
+            let link = validate_graph_edge(edge, &definition)?;
+            let edge_id = if edge.id.is_empty() {
+                Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!(
+                        "{}/{}/{}/{}/{}",
+                        version.id, edge.link_type, edge.source_id, edge.target_id, source.id
+                    )
+                    .as_bytes(),
+                )
+                .to_string()
+            } else {
+                edge.id.clone()
+            };
+            edges.push(GraphEdgeWrite {
+                workspace_id,
+                ontology_version_id,
+                link_type: edge.link_type.clone(),
+                edge_id,
+                source_type: link.source_type.clone(),
+                source_id: edge.source_id.clone(),
+                target_type: link.target_type.clone(),
+                target_id: edge.target_id.clone(),
+                data_source_id,
+                properties_json: edge.properties_json.clone(),
+                version: write_version,
+            });
+        }
+
+        let mut job = IngestionJob {
+            id: Uuid::new_v4().to_string(),
+            data_source_id: source.id,
+            state: IngestionState::Running as i32,
+            rows_read: request.nodes.len() as u64,
+            nodes_written: 0,
+            edges_written: 0,
+            rows_rejected: 0,
+            error: String::new(),
+            ontology_mapping_id: mapping.id,
+            ontology_version_id: version.id,
+            workspace_id: source.workspace_id,
+        };
+        self.jobs.write().await.insert(job.id.clone(), job.clone());
+        match self.graph.write_graph(&nodes, &edges).await {
+            Ok(()) => {
+                job.state = IngestionState::Succeeded as i32;
+                job.nodes_written = nodes.len() as u64;
+                job.edges_written = edges.len() as u64;
+            }
+            Err(error) => {
+                job.state = IngestionState::Failed as i32;
+                job.error = error.to_string();
+            }
+        }
+        self.jobs.write().await.insert(job.id.clone(), job.clone());
+        Ok(Response::new(job))
+    }
+
     async fn get_job(
         &self,
         request: Request<GetIngestionJobRequest>,
@@ -503,32 +680,283 @@ impl GraphService for Runtime {
         request: Request<GraphQuery>,
     ) -> Result<Response<QueryGraphResponse>, Status> {
         let query = request.into_inner();
-        if query.workspace_id != dev_workspace_id() {
-            return Err(Status::permission_denied("workspace is not accessible"));
-        }
-        if query.traversal.len() > 6 {
-            return Err(Status::invalid_argument(
-                "traversal depth exceeds the maximum of 6",
-            ));
-        }
+        let version = self
+            .ontology_version(&query.workspace_id, &query.ontology_version_id)
+            .await?;
+        let definition: OntologyDefinition = serde_json::from_str(&version.definition_json)
+            .map_err(|error| Status::internal(format!("stored ontology is invalid: {error}")))?;
+        validate_graph_query(&query, &definition)?;
         let limit = if query.limit == 0 { 500 } else { query.limit };
-        if limit > 5_000 {
-            return Err(Status::invalid_argument(
-                "node limit exceeds the maximum of 5000",
-            ));
+        let storage_query = graph_query_to_storage(&query, limit)?;
+        let mut nodes_by_key = HashMap::new();
+        let mut truncated = false;
+        for depth in 0..=storage_query.traversal.len() {
+            let remaining = limit as usize - nodes_by_key.len();
+            if remaining == 0 {
+                truncated = true;
+                break;
+            }
+            let mut prefix = storage_query.clone();
+            prefix.traversal.truncate(depth);
+            prefix.limit = u32::try_from(remaining)
+                .expect("remaining node budget never exceeds the validated u32 query limit");
+            let prefix_nodes = self
+                .graph
+                .query_nodes(&prefix)
+                .await
+                .map_err(storage_status)?;
+            truncated |= prefix_nodes.len() == remaining;
+            for node in prefix_nodes {
+                nodes_by_key.insert((node.object_type.clone(), node.object_id.clone()), node);
+            }
         }
+        let mut nodes = nodes_by_key.into_values().collect::<Vec<_>>();
+        nodes.sort_by(|left, right| {
+            (&left.object_type, &left.object_id).cmp(&(&right.object_type, &right.object_id))
+        });
+        let object_ids = nodes
+            .iter()
+            .map(|node| node.object_id.clone())
+            .collect::<Vec<_>>();
+        let edges = self
+            .graph
+            .edges_between(
+                storage_query.workspace_id,
+                storage_query.ontology_version_id,
+                &object_ids,
+                20_000,
+            )
+            .await
+            .map_err(storage_status)?;
         Ok(Response::new(QueryGraphResponse {
-            nodes: vec![],
-            edges: vec![],
+            nodes: nodes
+                .into_iter()
+                .map(|node| GraphNode {
+                    id: node.object_id,
+                    object_type: node.object_type,
+                    properties_json: node.properties_json,
+                })
+                .collect(),
+            edges: edges
+                .into_iter()
+                .map(|edge| GraphEdge {
+                    id: edge.edge_id,
+                    link_type: edge.link_type,
+                    source_id: edge.source_id,
+                    target_id: edge.target_id,
+                    properties_json: edge.properties_json,
+                })
+                .collect(),
             next_cursor: String::new(),
-            truncated: false,
+            truncated,
         }))
     }
     async fn get_object(
         &self,
-        _: Request<GetObjectRequest>,
+        request: Request<GetObjectRequest>,
     ) -> Result<Response<GraphNode>, Status> {
-        Err(Status::not_found("object not found"))
+        let request = request.into_inner();
+        let version = self
+            .ontology_version(&request.workspace_id, &request.ontology_version_id)
+            .await?;
+        let definition: OntologyDefinition = serde_json::from_str(&version.definition_json)
+            .map_err(|error| Status::internal(format!("stored ontology is invalid: {error}")))?;
+        if !definition
+            .object_types
+            .iter()
+            .any(|object_type| object_type.api_name == request.object_type)
+        {
+            return Err(Status::invalid_argument(
+                "object type does not exist in the ontology version",
+            ));
+        }
+        let node = self
+            .graph
+            .get_node(
+                parse_uuid(&request.workspace_id, "workspace_id")?,
+                parse_uuid(&request.ontology_version_id, "ontology_version_id")?,
+                &request.object_type,
+                &request.id,
+            )
+            .await
+            .map_err(storage_status)?;
+        Ok(Response::new(GraphNode {
+            id: node.object_id,
+            object_type: node.object_type,
+            properties_json: node.properties_json,
+        }))
+    }
+}
+
+fn validate_graph_node(node: &GraphNode, definition: &OntologyDefinition) -> Result<(), Status> {
+    if node.id.is_empty() || node.id.len() > 512 {
+        return Err(Status::invalid_argument(
+            "graph node id must contain between 1 and 512 characters",
+        ));
+    }
+    validate_api_name(&node.object_type)?;
+    if !definition
+        .object_types
+        .iter()
+        .any(|object_type| object_type.api_name == node.object_type)
+    {
+        return Err(Status::invalid_argument(format!(
+            "object type '{}' does not exist in the ontology version",
+            node.object_type
+        )));
+    }
+    validate_properties_json(&node.properties_json)
+}
+
+fn validate_graph_edge<'a>(
+    edge: &GraphEdge,
+    definition: &'a OntologyDefinition,
+) -> Result<&'a context_hub_domain::LinkTypeDefinition, Status> {
+    if edge.source_id.is_empty() || edge.target_id.is_empty() {
+        return Err(Status::invalid_argument(
+            "graph edge source_id and target_id are required",
+        ));
+    }
+    let link = definition
+        .link_types
+        .iter()
+        .find(|link| link.api_name == edge.link_type)
+        .ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "link type '{}' does not exist in the ontology version",
+                edge.link_type
+            ))
+        })?;
+    validate_properties_json(&edge.properties_json)?;
+    Ok(link)
+}
+
+fn validate_properties_json(value: &str) -> Result<(), Status> {
+    let value: serde_json::Value = serde_json::from_str(value)
+        .map_err(|error| Status::invalid_argument(format!("invalid properties JSON: {error}")))?;
+    if value.is_object() {
+        Ok(())
+    } else {
+        Err(Status::invalid_argument(
+            "graph properties must be a JSON object",
+        ))
+    }
+}
+
+fn validate_graph_query(query: &GraphQuery, definition: &OntologyDefinition) -> Result<(), Status> {
+    if !query.cursor.is_empty() {
+        return Err(Status::unimplemented(
+            "graph query cursors are not implemented yet",
+        ));
+    }
+    if query.traversal.len() > 6 {
+        return Err(Status::invalid_argument(
+            "traversal depth exceeds the maximum of 6",
+        ));
+    }
+    let root = definition
+        .object_types
+        .iter()
+        .find(|object_type| object_type.api_name == query.root_type)
+        .ok_or_else(|| Status::invalid_argument("root type does not exist in the ontology"))?;
+    for filter in &query.filters {
+        if !root
+            .properties
+            .iter()
+            .any(|property| property.api_name == filter.property)
+        {
+            return Err(Status::invalid_argument(format!(
+                "property '{}.{}' does not exist",
+                root.api_name, filter.property
+            )));
+        }
+    }
+    let mut current_type = query.root_type.as_str();
+    for step in &query.traversal {
+        let link = definition
+            .link_types
+            .iter()
+            .find(|link| link.api_name == step.link_type)
+            .ok_or_else(|| Status::invalid_argument("traversal link type does not exist"))?;
+        let (expected_source, expected_target) = if step.reverse {
+            (&link.target_type, &link.source_type)
+        } else {
+            (&link.source_type, &link.target_type)
+        };
+        if expected_source != current_type || expected_target != &step.target_type {
+            return Err(Status::invalid_argument(format!(
+                "traversal '{}' does not connect '{}' to '{}'",
+                step.link_type, current_type, step.target_type
+            )));
+        }
+        current_type = &step.target_type;
+    }
+    let limit = if query.limit == 0 { 500 } else { query.limit };
+    if limit > 5_000 {
+        return Err(Status::invalid_argument(
+            "node limit exceeds the maximum of 5000",
+        ));
+    }
+    Ok(())
+}
+
+fn graph_query_to_storage(query: &GraphQuery, limit: u32) -> Result<StorageGraphQuery, Status> {
+    let filters = query
+        .filters
+        .iter()
+        .map(|filter| {
+            if filter.values.len() != 1 {
+                return Err(Status::invalid_argument(
+                    "each graph filter currently requires exactly one value",
+                ));
+            }
+            let operator = match filter.operator {
+                1 => StorageFilterOperator::Equal,
+                2 => StorageFilterOperator::NotEqual,
+                3 => StorageFilterOperator::Contains,
+                4 => StorageFilterOperator::GreaterThan,
+                5 => StorageFilterOperator::LessThan,
+                _ => {
+                    return Err(Status::invalid_argument(
+                        "unsupported or unspecified filter operator",
+                    ));
+                }
+            };
+            Ok(StorageGraphFilter {
+                property: filter.property.clone(),
+                operator,
+                value: filter.values[0].clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, Status>>()?;
+    Ok(StorageGraphQuery {
+        workspace_id: parse_uuid(&query.workspace_id, "workspace_id")?,
+        ontology_version_id: parse_uuid(&query.ontology_version_id, "ontology_version_id")?,
+        root_type: query.root_type.clone(),
+        filters,
+        traversal: query
+            .traversal
+            .iter()
+            .map(|step| StorageTraversalStep {
+                link_type: step.link_type.clone(),
+                target_type: step.target_type.clone(),
+                reverse: step.reverse,
+            })
+            .collect(),
+        limit,
+    })
+}
+
+fn parse_uuid(value: &str, field: &str) -> Result<Uuid, Status> {
+    Uuid::parse_str(value)
+        .map_err(|error| Status::invalid_argument(format!("invalid {field}: {error}")))
+}
+
+fn storage_status(error: StorageError) -> Status {
+    match error {
+        StorageError::NotFound => Status::not_found("graph object not found"),
+        StorageError::InvalidRecord(message) => Status::invalid_argument(message),
+        other => Status::internal(other.to_string()),
     }
 }
 
@@ -579,7 +1007,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address: SocketAddr = std::env::var("GRPC_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:50051".into())
         .parse()?;
-    let runtime = Runtime::seeded().await;
+    let clickhouse = clickhouse::Client::default()
+        .with_url(
+            std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".into()),
+        )
+        .with_database(
+            std::env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "context_hub".into()),
+        )
+        .with_user(std::env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "context_hub".into()))
+        .with_password(
+            std::env::var("CLICKHOUSE_PASSWORD").unwrap_or_else(|_| "context_hub".into()),
+        )
+        .with_setting("input_format_binary_read_json_as_string", "1")
+        .with_setting("output_format_binary_write_json_as_string", "1");
+    let runtime =
+        Runtime::seeded_with_graph(Arc::new(ClickHouseGraphRepository::new(clickhouse))).await;
     tracing::info!(%address, "starting ContextHub gRPC and gRPC-Web server");
     Server::builder()
         .accept_http1(true)
@@ -676,5 +1118,95 @@ mod tests {
         assert_ne!(first_mappings[0].id, second_mappings[0].id);
         assert_eq!(first_mappings[0].ontology_id, first.id);
         assert_eq!(second_mappings[0].ontology_id, second.id);
+    }
+
+    #[tokio::test]
+    async fn imported_graph_is_queryable_only_through_its_ontology_version() {
+        let runtime = Runtime::seeded().await;
+        let ontology_id =
+            Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
+        let version = runtime
+            .publish(Request::new(PublishOntologyRequest {
+                ontology_id: ontology_id.clone(),
+                expected_revision: 0,
+            }))
+            .await
+            .expect("seed ontology can be published")
+            .into_inner();
+        let source = runtime
+            .save(Request::new(SaveDataSourceRequest {
+                data_source: Some(DataSource {
+                    id: String::new(),
+                    workspace_id: dev_workspace_id(),
+                    name: "Services".into(),
+                    kind: 1,
+                    configuration_json: "{}".into(),
+                }),
+            }))
+            .await
+            .expect("source can be saved")
+            .into_inner();
+        let mapping = runtime
+            .save_mapping(Request::new(SaveOntologyDataMappingRequest {
+                mapping: Some(OntologyDataMapping {
+                    id: String::new(),
+                    workspace_id: dev_workspace_id(),
+                    ontology_id,
+                    data_source_id: source.id.clone(),
+                    name: "Service mapping".into(),
+                    mapping_plan_json: "{}".into(),
+                    revision: 0,
+                }),
+            }))
+            .await
+            .expect("mapping can be saved")
+            .into_inner();
+
+        let job = runtime
+            .import_graph(Request::new(ImportGraphRequest {
+                data_source_id: source.id,
+                ontology_mapping_id: mapping.id,
+                ontology_version_id: version.id.clone(),
+                nodes: vec![GraphNode {
+                    id: "service:billing".into(),
+                    object_type: "service".into(),
+                    properties_json: r#"{"id":"billing","name":"Billing"}"#.into(),
+                }],
+                edges: vec![],
+            }))
+            .await
+            .expect("mapped graph can be imported")
+            .into_inner();
+        assert_eq!(job.state, IngestionState::Succeeded as i32);
+        assert_eq!(job.nodes_written, 1);
+
+        let graph = runtime
+            .query(Request::new(GraphQuery {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version.id.clone(),
+                root_type: "service".into(),
+                filters: vec![],
+                traversal: vec![],
+                projection: vec![],
+                limit: 50,
+                cursor: String::new(),
+            }))
+            .await
+            .expect("imported graph can be queried")
+            .into_inner();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].id, "service:billing");
+
+        let object = runtime
+            .get_object(Request::new(GetObjectRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version.id,
+                object_type: "service".into(),
+                id: "service:billing".into(),
+            }))
+            .await
+            .expect("imported object can be fetched")
+            .into_inner();
+        assert!(object.properties_json.contains("Billing"));
     }
 }
