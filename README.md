@@ -16,6 +16,7 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - Ontology-version-scoped graph batch ingestion with stable node/edge IDs and persistent ClickHouse storage.
 - A working `GraphService` for bounded node queries, traversals, edge results, and single-object lookup.
 - A unified ClickHouse schema for control-plane metadata and property-graph data.
+- Durable ClickHouse control-plane repositories for ontology drafts/versions, data-source metadata, ontology-specific mappings, and ingestion jobs, including runtime reload after restart.
 - gRPC and gRPC-Web contracts for workspaces, ontologies, data sources, ingestion, and graph queries.
 - Read-only MCP tools for schema discovery and graph access.
 - A Next.js frontend with an editable React Flow ontology/link editor, revisioned ontology-bound JSON/NDJSON/CSV object and link mappings, and a connected 2D/3D graph explorer.
@@ -65,4 +66,6 @@ Actions, scenarios, GeoPoint/GeoShape, Attachment/MediaReference, status/render 
 
 The browser uploads selected JSON, NDJSON, and CSV files to the backend and stores them durably in MinIO. It still also parses those files locally to provide an immediate mapping preview and in-session 2D/3D result. The backend can independently execute a saved mapping with `IngestionService.Start`: it reads the shared source from MinIO, maps it with Arrow/DataFusion, and persists the ontology-version-scoped graph in ClickHouse.
 
-Ontology drafts, mapping plans, data-source metadata, and ingestion job status currently live in backend memory; editor/mapping drafts and the immediate explorer graph also remain local to the browser. Consequently, a backend restart loses control-plane metadata and the UI does not yet invoke the publish/save-mapping/start-ingestion sequence. The next integration step is to connect those control-plane services to their existing ClickHouse schema and wire that sequence into the UI. REST and GraphQL connectors, multipart uploads beyond 32 MiB, durable/restartable workers, typed property-index writes, and production authentication remain future work.
+The browser import action now executes the complete backend sequence: publish the selected ontology, save its source-specific mapping, start DataFusion ingestion, poll the durable job, and open the local graph preview after success. Ontologies, versions, source metadata, mappings, and job results survive API restarts in ClickHouse. The immediate explorer graph is still browser-local; loading an already-persisted graph through `GraphService` after a page refresh is the next UI integration step.
+
+The worker currently executes the primary Object Mapping plus all of its Link Mappings. Additional Object Mappings in the same visual mapping draft are included in the local preview but need a multi-plan ingestion contract before they can be executed in one backend job. REST and GraphQL connectors, multipart uploads beyond 32 MiB, restartable queued/running workers, typed property-index writes, and production authentication remain future work.

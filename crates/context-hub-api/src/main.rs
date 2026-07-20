@@ -23,10 +23,12 @@ use context_hub_domain::{
 };
 use context_hub_mapping::{MappingPlan, SourceFormat, execute_source_mapping};
 use context_hub_storage::{
-    ClickHouseGraphRepository, FilterOperator as StorageFilterOperator, GraphEdgeWrite,
+    ClickHouseControlPlaneRepository, ClickHouseGraphRepository, ControlPlaneRepository,
+    ControlPlaneSnapshot, FilterOperator as StorageFilterOperator, GraphEdgeWrite,
     GraphFilter as StorageGraphFilter, GraphNodeWrite, GraphQuery as StorageGraphQuery,
     GraphRepository, ObjectStoreSourceRepository, SourceObjectStore, StorageError,
-    TraversalStep as StorageTraversalStep,
+    StoredDataSource, StoredIngestionJob, StoredOntology, StoredOntologyDraft,
+    StoredOntologyMapping, StoredOntologyVersion, TraversalStep as StorageTraversalStep,
 };
 #[cfg(test)]
 use context_hub_storage::{MemoryGraphRepository, MemorySourceObjectStore};
@@ -49,6 +51,7 @@ struct Runtime {
     jobs: Arc<RwLock<HashMap<String, IngestionJob>>>,
     graph: Arc<dyn GraphRepository>,
     source_store: Arc<dyn SourceObjectStore>,
+    control_plane: Option<Arc<dyn ControlPlaneRepository>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,14 +69,18 @@ impl Runtime {
         Self::seeded_with_stores(
             Arc::new(MemoryGraphRepository::default()),
             Arc::new(MemorySourceObjectStore::default()),
+            None,
         )
         .await
+        .expect("memory runtime can be seeded")
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn seeded_with_stores(
         graph: Arc<dyn GraphRepository>,
         source_store: Arc<dyn SourceObjectStore>,
-    ) -> Self {
+        control_plane: Option<Arc<dyn ControlPlaneRepository>>,
+    ) -> Result<Self, StorageError> {
         let runtime = Self {
             ontologies: Arc::default(),
             drafts: Arc::default(),
@@ -83,7 +90,17 @@ impl Runtime {
             jobs: Arc::default(),
             graph,
             source_store,
+            control_plane,
         };
+        if let Some(repository) = &runtime.control_plane {
+            let snapshot = repository
+                .load(parse_uuid_storage(&dev_workspace_id())?)
+                .await?;
+            if !snapshot.ontologies.is_empty() {
+                runtime.load_control_plane(snapshot).await?;
+                return Ok(runtime);
+            }
+        }
         let ontology_id =
             Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
         let definition = OntologyDefinition {
@@ -144,7 +161,151 @@ impl Runtime {
                 updated_at: Some(timestamp(now)),
             },
         );
-        runtime
+        if let Some(repository) = &runtime.control_plane {
+            let ontology = runtime
+                .ontologies
+                .read()
+                .await
+                .values()
+                .next()
+                .cloned()
+                .expect("seed ontology exists");
+            let draft = runtime
+                .drafts
+                .read()
+                .await
+                .values()
+                .next()
+                .cloned()
+                .expect("seed draft exists");
+            repository
+                .save_ontology(&stored_ontology(&ontology)?)
+                .await?;
+            repository.save_draft(&stored_draft(&draft)?).await?;
+        }
+        Ok(runtime)
+    }
+
+    async fn load_control_plane(&self, snapshot: ControlPlaneSnapshot) -> Result<(), StorageError> {
+        let active_versions = snapshot
+            .ontologies
+            .iter()
+            .filter_map(|ontology| ontology.active_version_id.map(|id| (ontology.id, id)))
+            .collect::<HashMap<_, _>>();
+        self.ontologies.write().await.extend(
+            snapshot
+                .ontologies
+                .into_iter()
+                .map(proto_ontology)
+                .map(|ontology| (ontology.id.clone(), ontology)),
+        );
+        self.drafts.write().await.extend(
+            snapshot
+                .drafts
+                .into_iter()
+                .map(proto_draft)
+                .map(|value| value.map(|draft| (draft.id.clone(), draft)))
+                .collect::<Result<HashMap<_, _>, _>>()?,
+        );
+        let mut versions = HashMap::<String, Vec<OntologyVersion>>::new();
+        for stored in snapshot.versions {
+            let active = active_versions.get(&stored.ontology_id) == Some(&stored.id);
+            let version = proto_version(stored, active)?;
+            versions
+                .entry(version.ontology_id.clone())
+                .or_default()
+                .push(version);
+        }
+        self.versions.write().await.extend(versions);
+        self.data_sources.write().await.extend(
+            snapshot
+                .data_sources
+                .into_iter()
+                .map(proto_data_source)
+                .map(|source| (source.id.clone(), source)),
+        );
+        self.mappings.write().await.extend(
+            snapshot
+                .mappings
+                .into_iter()
+                .map(proto_mapping)
+                .map(|mapping| (mapping.id.clone(), mapping)),
+        );
+        self.jobs.write().await.extend(
+            snapshot
+                .jobs
+                .into_iter()
+                .map(proto_job)
+                .map(|value| value.map(|job| (job.id.clone(), job)))
+                .collect::<Result<HashMap<_, _>, _>>()?,
+        );
+        Ok(())
+    }
+
+    async fn persist_ontology(&self, value: &Ontology) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .save_ontology(&stored_ontology(value).map_err(storage_status)?)
+                .await
+                .map_err(storage_status)?;
+        }
+        Ok(())
+    }
+
+    async fn persist_draft(&self, value: &OntologyDraft) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .save_draft(&stored_draft(value).map_err(storage_status)?)
+                .await
+                .map_err(storage_status)?;
+        }
+        Ok(())
+    }
+
+    async fn persist_version(
+        &self,
+        value: &OntologyVersion,
+        workspace_id: &str,
+    ) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .save_version(&stored_version(value, workspace_id).map_err(storage_status)?)
+                .await
+                .map_err(storage_status)?;
+        }
+        Ok(())
+    }
+
+    async fn persist_data_source(&self, value: &DataSource) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .save_data_source(
+                    &stored_data_source(value, persistence_revision()).map_err(storage_status)?,
+                )
+                .await
+                .map_err(storage_status)?;
+        }
+        Ok(())
+    }
+
+    async fn persist_mapping(&self, value: &OntologyDataMapping) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .save_mapping(&stored_mapping(value).map_err(storage_status)?)
+                .await
+                .map_err(storage_status)?;
+        }
+        Ok(())
+    }
+
+    async fn persist_job(&self, value: &IngestionJob) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .save_job(&stored_job(value, persistence_revision()).map_err(storage_status)?)
+                .await
+                .map_err(storage_status)?;
+        }
+        Ok(())
     }
 
     async fn ingestion_scope(
@@ -224,28 +385,43 @@ impl Runtime {
         mapping: OntologyDataMapping,
         version: OntologyVersion,
     ) {
-        if let Some(job) = self.jobs.write().await.get_mut(&job_id) {
-            job.state = IngestionState::Running as i32;
+        let running = {
+            let mut jobs = self.jobs.write().await;
+            jobs.get_mut(&job_id).map(|job| {
+                job.state = IngestionState::Running as i32;
+                job.clone()
+            })
+        };
+        if let Some(running) = running
+            && let Err(error) = self.persist_job(&running).await
+        {
+            tracing::error!(%error, %job_id, "failed to persist running ingestion job");
         }
         let result = self
             .ingest_uploaded_source(&source, &mapping, &version)
             .await;
-        let mut jobs = self.jobs.write().await;
-        let Some(job) = jobs.get_mut(&job_id) else {
-            return;
+        let completed = {
+            let mut jobs = self.jobs.write().await;
+            let Some(job) = jobs.get_mut(&job_id) else {
+                return;
+            };
+            match result {
+                Ok(mapped) => {
+                    job.state = IngestionState::Succeeded as i32;
+                    job.rows_read = mapped.rows_read;
+                    job.rows_rejected = mapped.rows_rejected;
+                    job.nodes_written = mapped.nodes.len() as u64;
+                    job.edges_written = mapped.edges.len() as u64;
+                }
+                Err(error) => {
+                    job.state = IngestionState::Failed as i32;
+                    job.error = error;
+                }
+            }
+            job.clone()
         };
-        match result {
-            Ok(mapped) => {
-                job.state = IngestionState::Succeeded as i32;
-                job.rows_read = mapped.rows_read;
-                job.rows_rejected = mapped.rows_rejected;
-                job.nodes_written = mapped.nodes.len() as u64;
-                job.edges_written = mapped.edges.len() as u64;
-            }
-            Err(error) => {
-                job.state = IngestionState::Failed as i32;
-                job.error = error;
-            }
+        if let Err(error) = self.persist_job(&completed).await {
+            tracing::error!(%error, %job_id, "failed to persist completed ingestion job");
         }
     }
 
@@ -408,20 +584,20 @@ impl OntologyService for Runtime {
             shared_properties: vec![],
             functions: vec![],
         };
-        self.drafts.write().await.insert(
-            id.clone(),
-            OntologyDraft {
-                id: id.clone(),
-                workspace_id: request.workspace_id,
-                name: request.name,
-                slug: definition.api_name.clone(),
-                revision: 0,
-                definition_json: serde_json::to_string_pretty(&definition)
-                    .map_err(|error| Status::internal(error.to_string()))?,
-                layout_json: "{}".into(),
-                updated_at: Some(timestamp(Utc::now())),
-            },
-        );
+        let draft = OntologyDraft {
+            id: id.clone(),
+            workspace_id: request.workspace_id,
+            name: request.name,
+            slug: definition.api_name.clone(),
+            revision: 0,
+            definition_json: serde_json::to_string_pretty(&definition)
+                .map_err(|error| Status::internal(error.to_string()))?,
+            layout_json: "{}".into(),
+            updated_at: Some(timestamp(Utc::now())),
+        };
+        self.persist_ontology(&ontology).await?;
+        self.persist_draft(&draft).await?;
+        self.drafts.write().await.insert(id.clone(), draft);
         self.ontologies.write().await.insert(id, ontology.clone());
         Ok(Response::new(ontology))
     }
@@ -486,6 +662,8 @@ impl OntologyService for Runtime {
         }
         incoming.updated_at = Some(timestamp(Utc::now()));
         drafts.insert(incoming.id.clone(), incoming.clone());
+        drop(drafts);
+        self.persist_draft(&incoming).await?;
         Ok(Response::new(incoming))
     }
 
@@ -560,9 +738,17 @@ impl OntologyService for Runtime {
             published_at: Some(timestamp(Utc::now())),
         };
         ontology_versions.push(version.clone());
-        if let Some(ontology) = self.ontologies.write().await.get_mut(&ontology_id) {
+        drop(versions);
+        let ontology = if let Some(ontology) = self.ontologies.write().await.get_mut(&ontology_id) {
             ontology.active_version_id.clone_from(&version.id);
             ontology.revision += 1;
+            Some(ontology.clone())
+        } else {
+            None
+        };
+        self.persist_version(&version, &draft.workspace_id).await?;
+        if let Some(ontology) = ontology {
+            self.persist_ontology(&ontology).await?;
         }
         Ok(Response::new(version))
     }
@@ -598,6 +784,7 @@ impl DataSourceService for Runtime {
         if source.workspace_id.is_empty() {
             source.workspace_id = dev_workspace_id();
         }
+        self.persist_data_source(&source).await?;
         self.data_sources
             .write()
             .await
@@ -660,6 +847,7 @@ impl DataSourceService for Runtime {
             configuration_json: serde_json::to_string(&configuration)
                 .map_err(|error| Status::internal(error.to_string()))?,
         };
+        self.persist_data_source(&source).await?;
         self.data_sources
             .write()
             .await
@@ -725,6 +913,8 @@ impl DataSourceService for Runtime {
             .get(&mapping.id)
             .map_or(1, |current| current.revision + 1);
         mappings.insert(mapping.id.clone(), mapping.clone());
+        drop(mappings);
+        self.persist_mapping(&mapping).await?;
         Ok(Response::new(mapping))
     }
 
@@ -775,6 +965,7 @@ impl IngestionService for Runtime {
             ontology_version_id: request.ontology_version_id,
             workspace_id: source.workspace_id.clone(),
         };
+        self.persist_job(&job).await?;
         self.jobs.write().await.insert(job.id.clone(), job.clone());
         let runtime = self.clone();
         let job_id = job.id.clone();
@@ -869,6 +1060,7 @@ impl IngestionService for Runtime {
             ontology_version_id: version.id,
             workspace_id: source.workspace_id,
         };
+        self.persist_job(&job).await?;
         self.jobs.write().await.insert(job.id.clone(), job.clone());
         match self.graph.write_graph(&nodes, &edges).await {
             Ok(()) => {
@@ -881,6 +1073,7 @@ impl IngestionService for Runtime {
                 job.error = error.to_string();
             }
         }
+        self.persist_job(&job).await?;
         self.jobs.write().await.insert(job.id.clone(), job.clone());
         Ok(Response::new(job))
     }
@@ -1301,6 +1494,202 @@ fn timestamp(value: chrono::DateTime<Utc>) -> Timestamp {
     }
 }
 
+fn persistence_revision() -> u64 {
+    u64::try_from(Utc::now().timestamp_micros()).unwrap_or_default()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedJobStats {
+    rows_read: u64,
+    nodes_written: u64,
+    edges_written: u64,
+    rows_rejected: u64,
+}
+
+fn parse_uuid_storage(value: &str) -> Result<Uuid, StorageError> {
+    Uuid::parse_str(value).map_err(|error| StorageError::InvalidRecord(error.to_string()))
+}
+
+fn timestamp_micros(value: Option<&Timestamp>) -> Result<i64, StorageError> {
+    let value = value.ok_or_else(|| StorageError::InvalidRecord("timestamp is missing".into()))?;
+    value
+        .seconds
+        .checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(i64::from(value.nanos) / 1_000))
+        .ok_or_else(|| {
+            StorageError::InvalidRecord("timestamp is outside the supported range".into())
+        })
+}
+
+fn proto_timestamp(micros: i64) -> Result<Timestamp, StorageError> {
+    let value = chrono::DateTime::from_timestamp_micros(micros).ok_or_else(|| {
+        StorageError::InvalidRecord("timestamp is outside the supported range".into())
+    })?;
+    Ok(timestamp(value))
+}
+
+fn stored_ontology(value: &Ontology) -> Result<StoredOntology, StorageError> {
+    Ok(StoredOntology {
+        id: parse_uuid_storage(&value.id)?,
+        workspace_id: parse_uuid_storage(&value.workspace_id)?,
+        name: value.name.clone(),
+        slug: value.slug.clone(),
+        active_version_id: (!value.active_version_id.is_empty())
+            .then(|| parse_uuid_storage(&value.active_version_id))
+            .transpose()?,
+        revision: value.revision,
+    })
+}
+
+fn proto_ontology(value: StoredOntology) -> Ontology {
+    Ontology {
+        id: value.id.to_string(),
+        workspace_id: value.workspace_id.to_string(),
+        name: value.name,
+        slug: value.slug,
+        active_version_id: value
+            .active_version_id
+            .map_or_else(String::new, |id| id.to_string()),
+        revision: value.revision,
+    }
+}
+
+fn stored_draft(value: &OntologyDraft) -> Result<StoredOntologyDraft, StorageError> {
+    Ok(StoredOntologyDraft {
+        id: parse_uuid_storage(&value.id)?,
+        workspace_id: parse_uuid_storage(&value.workspace_id)?,
+        revision: value.revision,
+        definition_json: value.definition_json.clone(),
+        layout_json: value.layout_json.clone(),
+        updated_at_micros: timestamp_micros(value.updated_at.as_ref())?,
+    })
+}
+
+fn proto_draft(value: StoredOntologyDraft) -> Result<OntologyDraft, StorageError> {
+    let definition: OntologyDefinition = serde_json::from_str(&value.definition_json)?;
+    Ok(OntologyDraft {
+        id: value.id.to_string(),
+        workspace_id: value.workspace_id.to_string(),
+        name: definition.display_name,
+        slug: definition.api_name,
+        revision: value.revision,
+        definition_json: value.definition_json,
+        layout_json: value.layout_json,
+        updated_at: Some(proto_timestamp(value.updated_at_micros)?),
+    })
+}
+
+fn stored_version(
+    value: &OntologyVersion,
+    workspace_id: &str,
+) -> Result<StoredOntologyVersion, StorageError> {
+    Ok(StoredOntologyVersion {
+        id: parse_uuid_storage(&value.id)?,
+        workspace_id: parse_uuid_storage(workspace_id)?,
+        ontology_id: parse_uuid_storage(&value.ontology_id)?,
+        version: value.version,
+        definition_json: value.definition_json.clone(),
+        checksum: value.checksum.clone(),
+        published_at_micros: timestamp_micros(value.published_at.as_ref())?,
+    })
+}
+
+fn proto_version(
+    value: StoredOntologyVersion,
+    active: bool,
+) -> Result<OntologyVersion, StorageError> {
+    Ok(OntologyVersion {
+        id: value.id.to_string(),
+        ontology_id: value.ontology_id.to_string(),
+        version: value.version,
+        definition_json: value.definition_json,
+        checksum: value.checksum,
+        active,
+        published_at: Some(proto_timestamp(value.published_at_micros)?),
+    })
+}
+
+fn stored_data_source(value: &DataSource, revision: u64) -> Result<StoredDataSource, StorageError> {
+    Ok(StoredDataSource {
+        id: parse_uuid_storage(&value.id)?,
+        workspace_id: parse_uuid_storage(&value.workspace_id)?,
+        name: value.name.clone(),
+        kind: value.kind,
+        configuration_json: value.configuration_json.clone(),
+        revision,
+    })
+}
+
+fn proto_data_source(value: StoredDataSource) -> DataSource {
+    DataSource {
+        id: value.id.to_string(),
+        workspace_id: value.workspace_id.to_string(),
+        name: value.name,
+        kind: value.kind,
+        configuration_json: value.configuration_json,
+    }
+}
+
+fn stored_mapping(value: &OntologyDataMapping) -> Result<StoredOntologyMapping, StorageError> {
+    Ok(StoredOntologyMapping {
+        id: parse_uuid_storage(&value.id)?,
+        workspace_id: parse_uuid_storage(&value.workspace_id)?,
+        ontology_id: parse_uuid_storage(&value.ontology_id)?,
+        data_source_id: parse_uuid_storage(&value.data_source_id)?,
+        name: value.name.clone(),
+        mapping_plan_json: value.mapping_plan_json.clone(),
+        revision: value.revision,
+    })
+}
+
+fn proto_mapping(value: StoredOntologyMapping) -> OntologyDataMapping {
+    OntologyDataMapping {
+        id: value.id.to_string(),
+        workspace_id: value.workspace_id.to_string(),
+        ontology_id: value.ontology_id.to_string(),
+        data_source_id: value.data_source_id.to_string(),
+        name: value.name,
+        mapping_plan_json: value.mapping_plan_json,
+        revision: value.revision,
+    }
+}
+
+fn stored_job(value: &IngestionJob, revision: u64) -> Result<StoredIngestionJob, StorageError> {
+    Ok(StoredIngestionJob {
+        id: parse_uuid_storage(&value.id)?,
+        workspace_id: parse_uuid_storage(&value.workspace_id)?,
+        data_source_id: parse_uuid_storage(&value.data_source_id)?,
+        ontology_mapping_id: parse_uuid_storage(&value.ontology_mapping_id)?,
+        ontology_version_id: parse_uuid_storage(&value.ontology_version_id)?,
+        state: value.state,
+        stats_json: serde_json::to_string(&PersistedJobStats {
+            rows_read: value.rows_read,
+            nodes_written: value.nodes_written,
+            edges_written: value.edges_written,
+            rows_rejected: value.rows_rejected,
+        })?,
+        error: value.error.clone(),
+        revision,
+    })
+}
+
+fn proto_job(value: StoredIngestionJob) -> Result<IngestionJob, StorageError> {
+    let stats: PersistedJobStats = serde_json::from_str(&value.stats_json)?;
+    Ok(IngestionJob {
+        id: value.id.to_string(),
+        data_source_id: value.data_source_id.to_string(),
+        state: value.state,
+        rows_read: stats.rows_read,
+        nodes_written: stats.nodes_written,
+        edges_written: stats.edges_written,
+        rows_rejected: stats.rows_rejected,
+        error: value.error,
+        ontology_mapping_id: value.ontology_mapping_id.to_string(),
+        ontology_version_id: value.ontology_version_id.to_string(),
+        workspace_id: value.workspace_id.to_string(),
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -1332,10 +1721,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &std::env::var("S3_SECRET_KEY").unwrap_or_else(|_| "context_hub_dev_secret".into()),
     )?;
     let runtime = Runtime::seeded_with_stores(
-        Arc::new(ClickHouseGraphRepository::new(clickhouse)),
+        Arc::new(ClickHouseGraphRepository::new(clickhouse.clone())),
         Arc::new(source_store),
+        Some(Arc::new(ClickHouseControlPlaneRepository::new(clickhouse))),
     )
-    .await;
+    .await?;
     tracing::info!(%address, "starting ContextHub gRPC and gRPC-Web server");
     Server::builder()
         .accept_http1(true)
@@ -1539,7 +1929,7 @@ mod tests {
 
     #[tokio::test]
     async fn uploaded_json_runs_through_datafusion_into_the_graph() {
-        assert_uploaded_json_pipeline(Runtime::seeded().await).await;
+        let _ = assert_uploaded_json_pipeline(Runtime::seeded().await).await;
     }
 
     #[tokio::test]
@@ -1556,22 +1946,49 @@ mod tests {
             .with_password("context_hub")
             .with_setting("input_format_binary_read_json_as_string", "1")
             .with_setting("output_format_binary_write_json_as_string", "1");
-        let source_store = ObjectStoreSourceRepository::s3(
-            &std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9002".into()),
-            &std::env::var("S3_BUCKET").unwrap_or_else(|_| "context-hub".into()),
-            &std::env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "context_hub".into()),
-            &std::env::var("S3_SECRET_KEY").unwrap_or_else(|_| "context_hub_dev_secret".into()),
-        )
-        .expect("MinIO can be configured");
+        let source_store: Arc<dyn SourceObjectStore> = Arc::new(
+            ObjectStoreSourceRepository::s3(
+                &std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9002".into()),
+                &std::env::var("S3_BUCKET").unwrap_or_else(|_| "context-hub".into()),
+                &std::env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "context_hub".into()),
+                &std::env::var("S3_SECRET_KEY").unwrap_or_else(|_| "context_hub_dev_secret".into()),
+            )
+            .expect("MinIO can be configured"),
+        );
         let runtime = Runtime::seeded_with_stores(
-            Arc::new(ClickHouseGraphRepository::new(clickhouse)),
-            Arc::new(source_store),
+            Arc::new(ClickHouseGraphRepository::new(clickhouse.clone())),
+            source_store.clone(),
+            Some(Arc::new(ClickHouseControlPlaneRepository::new(
+                clickhouse.clone(),
+            ))),
         )
-        .await;
-        assert_uploaded_json_pipeline(runtime).await;
+        .await
+        .expect("persistent runtime can be seeded");
+        let (source_id, mapping_id, version_id, job_id) =
+            assert_uploaded_json_pipeline(runtime).await;
+
+        let reloaded = Runtime::seeded_with_stores(
+            Arc::new(ClickHouseGraphRepository::new(clickhouse.clone())),
+            source_store,
+            Some(Arc::new(ClickHouseControlPlaneRepository::new(clickhouse))),
+        )
+        .await
+        .expect("persistent runtime can be reloaded");
+        assert!(reloaded.data_sources.read().await.contains_key(&source_id));
+        assert!(reloaded.mappings.read().await.contains_key(&mapping_id));
+        assert!(reloaded.jobs.read().await.contains_key(&job_id));
+        assert!(
+            reloaded
+                .versions
+                .read()
+                .await
+                .values()
+                .flatten()
+                .any(|version| version.id == version_id)
+        );
     }
 
-    async fn assert_uploaded_json_pipeline(runtime: Runtime) {
+    async fn assert_uploaded_json_pipeline(runtime: Runtime) -> (String, String, String, String) {
         let ontology_id =
             Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
         let version = runtime
@@ -1624,8 +2041,8 @@ mod tests {
             .into_inner();
         let queued = runtime
             .start(Request::new(StartIngestionRequest {
-                data_source_id: source.id,
-                ontology_mapping_id: mapping.id,
+                data_source_id: source.id.clone(),
+                ontology_mapping_id: mapping.id.clone(),
                 ontology_version_id: version.id.clone(),
             }))
             .await
@@ -1654,7 +2071,7 @@ mod tests {
         let graph = runtime
             .query(Request::new(GraphQuery {
                 workspace_id: dev_workspace_id(),
-                ontology_version_id: version.id,
+                ontology_version_id: version.id.clone(),
                 root_type: "service".into(),
                 filters: vec![],
                 traversal: vec![],
@@ -1667,5 +2084,6 @@ mod tests {
             .into_inner();
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].id, "service:billing");
+        (source.id, mapping.id, version.id, completed.id)
     }
 }

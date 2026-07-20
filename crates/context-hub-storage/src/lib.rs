@@ -189,6 +189,277 @@ pub trait SourceObjectStore: Send + Sync {
     async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError>;
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ControlPlaneSnapshot {
+    pub ontologies: Vec<StoredOntology>,
+    pub drafts: Vec<StoredOntologyDraft>,
+    pub versions: Vec<StoredOntologyVersion>,
+    pub data_sources: Vec<StoredDataSource>,
+    pub mappings: Vec<StoredOntologyMapping>,
+    pub jobs: Vec<StoredIngestionJob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredOntology {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub active_version_id: Option<Uuid>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredOntologyDraft {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub revision: u64,
+    pub definition_json: String,
+    pub layout_json: String,
+    pub updated_at_micros: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredOntologyVersion {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub ontology_id: Uuid,
+    pub version: u64,
+    pub definition_json: String,
+    pub checksum: String,
+    pub published_at_micros: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredDataSource {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub kind: i32,
+    pub configuration_json: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredOntologyMapping {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub ontology_id: Uuid,
+    pub data_source_id: Uuid,
+    pub name: String,
+    pub mapping_plan_json: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredIngestionJob {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub data_source_id: Uuid,
+    pub ontology_mapping_id: Uuid,
+    pub ontology_version_id: Uuid,
+    pub state: i32,
+    pub stats_json: String,
+    pub error: String,
+    pub revision: u64,
+}
+
+#[async_trait]
+pub trait ControlPlaneRepository: Send + Sync {
+    async fn load(&self, workspace_id: Uuid) -> Result<ControlPlaneSnapshot, StorageError>;
+    async fn save_ontology(&self, value: &StoredOntology) -> Result<(), StorageError>;
+    async fn save_draft(&self, value: &StoredOntologyDraft) -> Result<(), StorageError>;
+    async fn save_version(&self, value: &StoredOntologyVersion) -> Result<(), StorageError>;
+    async fn save_data_source(&self, value: &StoredDataSource) -> Result<(), StorageError>;
+    async fn save_mapping(&self, value: &StoredOntologyMapping) -> Result<(), StorageError>;
+    async fn save_job(&self, value: &StoredIngestionJob) -> Result<(), StorageError>;
+}
+
+#[derive(Clone)]
+pub struct ClickHouseControlPlaneRepository {
+    client: clickhouse::Client,
+}
+
+impl ClickHouseControlPlaneRepository {
+    pub fn new(client: clickhouse::Client) -> Self {
+        Self { client }
+    }
+
+    async fn insert_json(
+        &self,
+        statement: &str,
+        value: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let mut insert = self.client.insert_formatted_with(statement).buffered();
+        insert
+            .write_all(format!("{}\n", serde_json::to_string(&value)?).as_bytes())
+            .await?;
+        insert.end().await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
+    #[allow(clippy::too_many_lines)]
+    async fn load(&self, workspace_id: Uuid) -> Result<ControlPlaneSnapshot, StorageError> {
+        let workspace = workspace_id.to_string();
+        let ontology_rows = self.client.query("SELECT toString(id), toString(workspace_id), name, slug, ifNull(toString(active_version_id), ''), revision FROM ontologies FINAL WHERE workspace_id = ? AND deleted = false")
+            .bind(&workspace).fetch_all::<(String, String, String, String, String, u64)>().await?;
+        let ontologies = ontology_rows
+            .into_iter()
+            .map(|row| {
+                Ok(StoredOntology {
+                    id: parse_uuid(&row.0, "ontology id")?,
+                    workspace_id: parse_uuid(&row.1, "workspace id")?,
+                    name: row.2,
+                    slug: row.3,
+                    active_version_id: (!row.4.is_empty())
+                        .then(|| parse_uuid(&row.4, "active version id"))
+                        .transpose()?,
+                    revision: row.5,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let draft_rows = self.client.query("SELECT toString(id), toString(workspace_id), revision, definition_json, layout_json, toUnixTimestamp64Micro(updated_at) FROM ontology_drafts FINAL WHERE workspace_id = ? AND deleted = false")
+            .bind(&workspace).fetch_all::<(String, String, u64, String, String, i64)>().await?;
+        let drafts = draft_rows
+            .into_iter()
+            .map(|row| {
+                Ok(StoredOntologyDraft {
+                    id: parse_uuid(&row.0, "draft id")?,
+                    workspace_id: parse_uuid(&row.1, "workspace id")?,
+                    revision: row.2,
+                    definition_json: row.3,
+                    layout_json: row.4,
+                    updated_at_micros: row.5,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let version_rows = self.client.query("SELECT toString(id), toString(workspace_id), toString(ontology_id), version, definition_json, toString(checksum), toUnixTimestamp64Micro(published_at) FROM ontology_versions FINAL WHERE workspace_id = ? ORDER BY ontology_id, version")
+            .bind(&workspace).fetch_all::<(String, String, String, u64, String, String, i64)>().await?;
+        let versions = version_rows
+            .into_iter()
+            .map(|row| {
+                Ok(StoredOntologyVersion {
+                    id: parse_uuid(&row.0, "version id")?,
+                    workspace_id: parse_uuid(&row.1, "workspace id")?,
+                    ontology_id: parse_uuid(&row.2, "ontology id")?,
+                    version: row.3,
+                    definition_json: row.4,
+                    checksum: row.5,
+                    published_at_micros: row.6,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let source_rows = self.client.query("SELECT toString(id), toString(workspace_id), name, toInt32(kind), configuration_json, revision FROM data_sources FINAL WHERE workspace_id = ? AND deleted = false")
+            .bind(&workspace).fetch_all::<(String, String, String, i32, String, u64)>().await?;
+        let data_sources = source_rows
+            .into_iter()
+            .map(|row| {
+                Ok(StoredDataSource {
+                    id: parse_uuid(&row.0, "data source id")?,
+                    workspace_id: parse_uuid(&row.1, "workspace id")?,
+                    name: row.2,
+                    kind: row.3,
+                    configuration_json: row.4,
+                    revision: row.5,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let mapping_rows = self.client.query("SELECT toString(id), toString(workspace_id), toString(ontology_id), toString(data_source_id), name, mapping_plan_json, revision FROM ontology_data_mappings FINAL WHERE workspace_id = ? AND deleted = false")
+            .bind(&workspace).fetch_all::<(String, String, String, String, String, String, u64)>().await?;
+        let mappings = mapping_rows
+            .into_iter()
+            .map(|row| {
+                Ok(StoredOntologyMapping {
+                    id: parse_uuid(&row.0, "mapping id")?,
+                    workspace_id: parse_uuid(&row.1, "workspace id")?,
+                    ontology_id: parse_uuid(&row.2, "ontology id")?,
+                    data_source_id: parse_uuid(&row.3, "data source id")?,
+                    name: row.4,
+                    mapping_plan_json: row.5,
+                    revision: row.6,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let job_rows = self.client.query("SELECT toString(id), toString(workspace_id), toString(data_source_id), toString(ontology_mapping_id), toString(ontology_version_id), toInt32(state), stats_json, error, revision FROM ingestion_jobs FINAL WHERE workspace_id = ?")
+            .bind(&workspace).fetch_all::<(String, String, String, String, String, i32, String, String, u64)>().await?;
+        let jobs = job_rows
+            .into_iter()
+            .map(|row| {
+                Ok(StoredIngestionJob {
+                    id: parse_uuid(&row.0, "job id")?,
+                    workspace_id: parse_uuid(&row.1, "workspace id")?,
+                    data_source_id: parse_uuid(&row.2, "data source id")?,
+                    ontology_mapping_id: parse_uuid(&row.3, "mapping id")?,
+                    ontology_version_id: parse_uuid(&row.4, "version id")?,
+                    state: row.5,
+                    stats_json: row.6,
+                    error: row.7,
+                    revision: row.8,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        Ok(ControlPlaneSnapshot {
+            ontologies,
+            drafts,
+            versions,
+            data_sources,
+            mappings,
+            jobs,
+        })
+    }
+
+    async fn save_ontology(&self, value: &StoredOntology) -> Result<(), StorageError> {
+        self.insert_json("INSERT INTO ontologies (id, workspace_id, name, slug, active_version_id, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "name": value.name, "slug": value.slug, "active_version_id": value.active_version_id, "revision": value.revision, "deleted": false })).await
+    }
+
+    async fn save_draft(&self, value: &StoredOntologyDraft) -> Result<(), StorageError> {
+        self.insert_json("INSERT INTO ontology_drafts (id, workspace_id, revision, definition_json, layout_json, updated_at, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "revision": value.revision, "definition_json": value.definition_json, "layout_json": value.layout_json, "updated_at": timestamp_from_micros(value.updated_at_micros)?.format("%Y-%m-%d %H:%M:%S%.6f").to_string(), "deleted": false })).await
+    }
+
+    async fn save_version(&self, value: &StoredOntologyVersion) -> Result<(), StorageError> {
+        self.insert_json("INSERT INTO ontology_versions (id, workspace_id, ontology_id, version, definition_json, checksum, published_at, active) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "ontology_id": value.ontology_id, "version": value.version, "definition_json": value.definition_json, "checksum": value.checksum, "published_at": timestamp_from_micros(value.published_at_micros)?.format("%Y-%m-%d %H:%M:%S%.6f").to_string(), "active": true })).await
+    }
+
+    async fn save_data_source(&self, value: &StoredDataSource) -> Result<(), StorageError> {
+        let kind = match value.kind {
+            1 => "upload",
+            2 => "rest",
+            3 => "graphql",
+            _ => {
+                return Err(StorageError::InvalidRecord(format!(
+                    "unsupported data source kind {}",
+                    value.kind
+                )));
+            }
+        };
+        self.insert_json("INSERT INTO data_sources (id, workspace_id, name, kind, configuration_json, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "name": value.name, "kind": kind, "configuration_json": value.configuration_json, "revision": value.revision, "deleted": false })).await
+    }
+
+    async fn save_mapping(&self, value: &StoredOntologyMapping) -> Result<(), StorageError> {
+        self.insert_json("INSERT INTO ontology_data_mappings (id, workspace_id, ontology_id, data_source_id, name, mapping_plan_json, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "ontology_id": value.ontology_id, "data_source_id": value.data_source_id, "name": value.name, "mapping_plan_json": value.mapping_plan_json, "revision": value.revision, "deleted": false })).await
+    }
+
+    async fn save_job(&self, value: &StoredIngestionJob) -> Result<(), StorageError> {
+        let state = match value.state {
+            1 => "queued",
+            2 => "running",
+            3 => "succeeded",
+            4 => "failed",
+            5 => "cancelled",
+            _ => {
+                return Err(StorageError::InvalidRecord(format!(
+                    "unsupported ingestion state {}",
+                    value.state
+                )));
+            }
+        };
+        self.insert_json("INSERT INTO ingestion_jobs (id, workspace_id, data_source_id, ontology_mapping_id, ontology_version_id, state, stats_json, error, revision) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "data_source_id": value.data_source_id, "ontology_mapping_id": value.ontology_mapping_id, "ontology_version_id": value.ontology_version_id, "state": state, "stats_json": value.stats_json, "error": value.error, "revision": value.revision })).await
+    }
+}
+
 #[derive(Clone)]
 pub struct ObjectStoreSourceRepository {
     store: Arc<dyn ObjectStore>,

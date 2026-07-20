@@ -2,8 +2,12 @@ import { createClient } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import {
   DataSourceService,
+  IngestionService,
+  IngestionState,
+  OntologyService,
   SourceFileFormat,
 } from "@/gen/context_hub/v1/context_hub_pb";
+import type { OntologyCatalog } from "@/lib/ontology-catalog";
 
 export const DEV_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -13,6 +17,29 @@ const transport = createGrpcWebTransport({
 });
 
 const dataSources = createClient(DataSourceService, transport);
+const ontologies = createClient(OntologyService, transport);
+const ingestions = createClient(IngestionService, transport);
+
+export type BackendOntology = { id: string; name: string; slug: string };
+
+export type BackendFieldMapping = {
+  sourceField: string;
+  targetProperty: string;
+  transform: "None" | "Trim" | "Lowercase" | "Uppercase";
+};
+
+export type BackendObjectMapping = {
+  objectType: string;
+  identityProperty: string;
+  properties: BackendFieldMapping[];
+};
+
+export type BackendLinkMapping = {
+  sourceField: string;
+  linkType: string;
+  targetObjectType: string;
+  targetIdentityProperty: string;
+};
 
 function sourceFormat(fileName: string): SourceFileFormat {
   if (/\.(ndjson|jsonl)$/i.test(fileName)) return SourceFileFormat.NDJSON;
@@ -35,4 +62,134 @@ export async function uploadWorkspaceSource(file: File) {
     sizeBytes: response.sizeBytes,
     sha256: response.sha256,
   };
+}
+
+export async function listWorkspaceOntologies(): Promise<BackendOntology[]> {
+  const response = await ontologies.list({ workspaceId: DEV_WORKSPACE_ID });
+  return response.ontologies.map((ontology) => ({ id: ontology.id, name: ontology.name, slug: ontology.slug }));
+}
+
+export async function createWorkspaceOntology(name: string, slug: string): Promise<BackendOntology> {
+  const ontology = await ontologies.create({ workspaceId: DEV_WORKSPACE_ID, name, slug });
+  return { id: ontology.id, name: ontology.name, slug: ontology.slug };
+}
+
+function ontologyDefinition(name: string, slug: string, catalog: OntologyCatalog) {
+  return {
+    api_name: slug,
+    display_name: name,
+    description: null,
+    object_types: catalog.objectTypes.map((objectType) => ({
+      api_name: objectType.apiName,
+      display_name: objectType.displayName,
+      description: null,
+      properties: objectType.properties.filter((property) => !property.derived).map((property) => ({
+        api_name: property.apiName,
+        display_name: property.displayName,
+        value_type: { scalar: scalarType(property.type), list: property.type === "List" },
+        required: !!property.identity,
+        unique: !!property.identity,
+        identity: !!property.identity,
+        indexed: !!property.identity,
+        description: null,
+      })),
+      shared_properties: [],
+      derived_properties: [],
+      implements: [],
+    })),
+    link_types: catalog.linkTypes.map((link) => ({
+      api_name: link.apiName,
+      display_name: link.displayName,
+      source_type: link.sourceType,
+      target_type: link.targetType,
+      source_cardinality: "many",
+      target_cardinality: "many",
+      required: false,
+      properties: [],
+      description: null,
+    })),
+    interfaces: [], value_types: [], struct_types: [], shared_properties: [], functions: [],
+  };
+}
+
+function scalarType(type: string) {
+  const known: Record<string, string> = {
+    String: "string", Boolean: "boolean", Int64: "int64", Float64: "float64",
+    Decimal: "decimal", Date: "date", Timestamp: "timestamp", UUID: "uuid", JSON: "json",
+  };
+  return known[type] ?? "string";
+}
+
+export async function publishOntologyCatalog(ontology: BackendOntology, catalog: OntologyCatalog) {
+  const current = await ontologies.getDraft({ id: ontology.id });
+  const definitionJson = JSON.stringify(ontologyDefinition(ontology.name, ontology.slug, catalog));
+  const saved = await ontologies.saveDraft({
+    draft: {
+      id: current.id,
+      workspaceId: current.workspaceId,
+      name: ontology.name,
+      slug: ontology.slug,
+      revision: current.revision,
+      definitionJson,
+      layoutJson: current.layoutJson || "{}",
+      updatedAt: current.updatedAt,
+    },
+    expectedRevision: current.revision,
+  });
+  return ontologies.publish({ ontologyId: ontology.id, expectedRevision: saved.revision });
+}
+
+function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapping[]) {
+  const identityFields = objectMapping.properties
+    .filter((field) => field.targetProperty === objectMapping.identityProperty)
+    .map((field) => field.sourceField);
+  const transforms: Record<BackendFieldMapping["transform"], Array<{ kind: string }>> = {
+    None: [], Trim: [{ kind: "trim" }], Lowercase: [{ kind: "lowercase" }], Uppercase: [{ kind: "uppercase" }],
+  };
+  return {
+    id: crypto.randomUUID(),
+    object_type: objectMapping.objectType,
+    identity_fields: identityFields,
+    fields: objectMapping.properties.map((field) => ({
+      source: field.sourceField,
+      target: field.targetProperty,
+      transforms: transforms[field.transform],
+      on_error: "reject_row",
+    })),
+    links: links.map((link) => ({
+      link_type: link.linkType,
+      target_object_type: link.targetObjectType,
+      source_fields: [link.sourceField],
+      target_identity_fields: [link.targetIdentityProperty],
+    })),
+    row_filter: null,
+  };
+}
+
+export async function saveOntologyMapping(options: {
+  id?: string;
+  ontologyId: string;
+  dataSourceId: string;
+  name: string;
+  objectMapping: BackendObjectMapping;
+  links: BackendLinkMapping[];
+}) {
+  return dataSources.saveMapping({ mapping: {
+    id: options.id ?? "",
+    workspaceId: DEV_WORKSPACE_ID,
+    ontologyId: options.ontologyId,
+    dataSourceId: options.dataSourceId,
+    name: options.name,
+    mappingPlanJson: JSON.stringify(mappingPlan(options.objectMapping, options.links)),
+    revision: 0n,
+  } });
+}
+
+export async function startIngestion(dataSourceId: string, mappingId: string, versionId: string) {
+  let job = await ingestions.start({ dataSourceId, ontologyMappingId: mappingId, ontologyVersionId: versionId });
+  for (let attempt = 0; attempt < 300 && (job.state === IngestionState.QUEUED || job.state === IngestionState.RUNNING); attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+    job = await ingestions.getJob({ id: job.id });
+  }
+  return job;
 }

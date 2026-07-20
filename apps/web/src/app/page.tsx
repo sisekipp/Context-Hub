@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Boxes, DatabaseZap, Orbit, Plus, Workflow } from "lucide-react";
 import { GraphExplorer } from "@/components/graph-explorer";
 import { MappingPanel, type BrowserDataSource } from "@/components/mapping-panel";
 import { OntologyEditor } from "@/components/ontology-editor";
 import { emptyGraph, type ImportedGraph } from "@/lib/graph-data";
 import { defaultOntologyCatalog, type OntologyCatalog } from "@/lib/ontology-catalog";
+import { createWorkspaceOntology, listWorkspaceOntologies } from "@/lib/context-hub-client";
 
 type Section = "ontology" | "mapping" | "graph";
 type OntologyWorkspace = { id: string; name: string; slug: string };
@@ -77,11 +78,35 @@ export default function Home() {
     setCatalogs((items) => ({ ...items, [activeOntology.id]: catalog }));
   }, [activeOntology.id]);
 
-  function createOntology() {
+  useEffect(() => {
+    let cancelled = false;
+    void listWorkspaceOntologies().then((backendOntologies) => {
+      if (cancelled || !backendOntologies.length) return;
+      const current = parseRegistry(registrySnapshot());
+      for (const ontology of backendOntologies) {
+        if (ontology.slug === defaultOntology.slug) {
+          const oldKey = `context-hub.ontology.${defaultOntology.id}`;
+          const newKey = `context-hub.ontology.${ontology.id}`;
+          const oldDraft = localStorage.getItem(oldKey);
+          if (oldDraft && !localStorage.getItem(newKey)) localStorage.setItem(newKey, oldDraft);
+        }
+      }
+      const activeSlug = current.ontologies.find((item) => item.id === current.activeOntologyId)?.slug;
+      const active = backendOntologies.find((item) => item.slug === activeSlug) ?? backendOntologies[0];
+      saveRegistry({ ontologies: backendOntologies, activeOntologyId: active.id });
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  async function createOntology() {
     const number = ontologies.length + 1;
-    const ontology = { id: crypto.randomUUID(), name: `Ontology ${number}`, slug: `ontology_${number}` };
-    saveRegistry({ ontologies: [...ontologies, ontology], activeOntologyId: ontology.id });
-    setSection("ontology");
+    try {
+      const ontology = await createWorkspaceOntology(`Ontology ${number}`, `ontology_${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`);
+      saveRegistry({ ontologies: [...ontologies, ontology], activeOntologyId: ontology.id });
+      setSection("ontology");
+    } catch {
+      // Keep the current registry unchanged when the backend cannot create the ontology.
+    }
   }
 
   function renameOntology(name: string) {
@@ -110,8 +135,8 @@ export default function Home() {
         <div className="sidebar-footer"><span className="eyebrow">Active ontology</span><strong>{activeOntology.name}</strong><span>{activeOntology.slug} · isolated graph</span></div>
       </aside>
       <section className="main-stage">
-        <div className={section === "ontology" ? "section-pane active" : "section-pane"}><OntologyEditor key={activeOntology.id} ontologyId={activeOntology.id} ontologyName={activeOntology.name} seedTemplate={activeOntology.id === defaultOntology.id} onRename={renameOntology} onCatalogChange={updateActiveCatalog} /></div>
-        {section === "mapping" && <MappingPanel key={`${activeOntology.id}:${activeDataSource?.id ?? "new"}`} ontologyId={activeOntology.id} ontology={activeCatalog} dataSource={activeDataSource} onDataSourceLoaded={registerDataSource} onImport={(imported) => { setGraphs((items) => ({ ...items, [activeOntology.id]: imported })); setSection("graph"); }} />}
+        <div className={section === "ontology" ? "section-pane active" : "section-pane"}><OntologyEditor key={activeOntology.id} ontologyId={activeOntology.id} ontologyName={activeOntology.name} seedTemplate={activeOntology.slug === defaultOntology.slug} onRename={renameOntology} onCatalogChange={updateActiveCatalog} /></div>
+        {section === "mapping" && <MappingPanel key={`${activeOntology.id}:${activeDataSource?.id ?? "new"}`} ontologyId={activeOntology.id} ontologyName={activeOntology.name} ontologySlug={activeOntology.slug} ontology={activeCatalog} dataSource={activeDataSource} onDataSourceLoaded={registerDataSource} onImport={(imported) => { setGraphs((items) => ({ ...items, [activeOntology.id]: imported })); setSection("graph"); }} />}
         {section === "graph" && <GraphExplorer graph={activeGraph} onOpenMapping={() => setSection("mapping")} onOpenOntology={() => setSection("ontology")} />}
       </section>
     </main>

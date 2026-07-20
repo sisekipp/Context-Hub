@@ -4,7 +4,8 @@ import { ChangeEvent, useMemo, useState } from "react";
 import { ArrowRight, CheckCircle2, FileJson2, GitBranch, Play, Plus, Save, Trash2, Upload } from "lucide-react";
 import type { GraphValue, ImportedGraph } from "@/lib/graph-data";
 import type { OntologyCatalog, OntologyObjectType } from "@/lib/ontology-catalog";
-import { uploadWorkspaceSource } from "@/lib/context-hub-client";
+import { IngestionState } from "@/gen/context_hub/v1/context_hub_pb";
+import { publishOntologyCatalog, saveOntologyMapping, startIngestion, uploadWorkspaceSource } from "@/lib/context-hub-client";
 
 export type SourceRecord = Record<string, GraphValue>;
 export type BrowserDataSource = { id: string; fileName: string; records: SourceRecord[] };
@@ -102,18 +103,19 @@ function prepareSourceMapping(ontologyId: string, ontology: OntologyCatalog, fil
   const saved = localStorage.getItem(`context-hub.mapping.${ontologyId}`);
   if (saved) {
     try {
-      const candidate = JSON.parse(saved) as { revision?: number; fileName?: string; objectMappings?: ObjectMapping[]; linkMappings?: LinkMapping[] };
+      const candidate = JSON.parse(saved) as { revision?: number; backendMappingId?: string; fileName?: string; objectMappings?: ObjectMapping[]; linkMappings?: LinkMapping[] };
       const typesStillExist = candidate.objectMappings?.every((mapping) => ontology.objectTypes.some((type) => type.apiName === mapping.objectType));
       if (candidate.fileName === fileName && candidate.objectMappings?.length && typesStillExist) {
         objectMappings = candidate.objectMappings;
         linkMappings = candidate.linkMappings ?? [];
         revision = candidate.revision ?? 0;
+        return { objectMappings, linkMappings, revision, backendMappingId: candidate.backendMappingId ?? "" };
       }
     } catch {
       // Ignore an unreadable local draft and create a new mapping from the detected schema.
     }
   }
-  return { objectMappings, linkMappings, revision };
+  return { objectMappings, linkMappings, revision, backendMappingId: "" };
 }
 
 function linkForMapping(link: LinkMapping, objectMappings: ObjectMapping[], ontology: OntologyCatalog) {
@@ -180,13 +182,13 @@ export function buildImportedGraph(options: {
   };
 }
 
-export function MappingPanel({ ontologyId, ontology, dataSource, onDataSourceLoaded, onImport }: { ontologyId: string; ontology: OntologyCatalog; dataSource: BrowserDataSource | null; onDataSourceLoaded: (source: BrowserDataSource) => void; onImport: (graph: ImportedGraph) => void }) {
+export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology, dataSource, onDataSourceLoaded, onImport }: { ontologyId: string; ontologyName: string; ontologySlug: string; ontology: OntologyCatalog; dataSource: BrowserDataSource | null; onDataSourceLoaded: (source: BrowserDataSource) => void; onImport: (graph: ImportedGraph) => void }) {
   const prepared = useMemo(() => {
-    if (!dataSource) return { objectMappings: [] as ObjectMapping[], linkMappings: [] as LinkMapping[], revision: 0, error: "" };
+    if (!dataSource) return { objectMappings: [] as ObjectMapping[], linkMappings: [] as LinkMapping[], revision: 0, backendMappingId: "", error: "" };
     try {
       return { ...prepareSourceMapping(ontologyId, ontology, dataSource.fileName, dataSource.records), error: "" };
     } catch (error) {
-      return { objectMappings: [] as ObjectMapping[], linkMappings: [] as LinkMapping[], revision: 0, error: error instanceof Error ? error.message : "The source cannot be mapped." };
+      return { objectMappings: [] as ObjectMapping[], linkMappings: [] as LinkMapping[], revision: 0, backendMappingId: "", error: error instanceof Error ? error.message : "The source cannot be mapped." };
     }
   }, [dataSource, ontology, ontologyId]);
   const [fileName] = useState(dataSource?.fileName ?? "");
@@ -196,6 +198,8 @@ export function MappingPanel({ ontologyId, ontology, dataSource, onDataSourceLoa
   const [linkMappings, setLinkMappings] = useState<LinkMapping[]>(prepared.linkMappings);
   const [previewGraph, setPreviewGraph] = useState<ImportedGraph | null>(null);
   const [revision, setRevision] = useState(prepared.revision);
+  const [backendMappingId, setBackendMappingId] = useState(prepared.backendMappingId);
+  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(prepared.error || (dataSource ? `${dataSource.records.length.toLocaleString("de-DE")} records ready from the shared workspace source.` : "Choose a JSON, NDJSON or CSV file."));
   const sourceFields = useMemo(() => Array.from(new Set(records.flatMap((record) => Object.keys(record)))), [records]);
   const activeMapping = objectMappings.find((mapping) => mapping.id === activeMappingId) ?? objectMappings[0];
@@ -256,19 +260,68 @@ export function MappingPanel({ ontologyId, ontology, dataSource, onDataSourceLoa
     return buildImportedGraph({ records, objectMappings, linkMappings, ontology, fileName });
   }
 
-  function saveMapping() {
-    const nextRevision = revision + 1;
-    localStorage.setItem(`context-hub.mapping.${ontologyId}`, JSON.stringify({ revision: nextRevision, fileName, objectMappings, linkMappings }));
-    setRevision(nextRevision); setMessage(`Mapping revision ${nextRevision} saved locally.`);
+  function backendMapping() {
+    const objectMapping = objectMappings[0];
+    const objectType = ontology.objectTypes.find((type) => type.apiName === objectMapping?.objectType);
+    const identityProperty = objectType?.properties.find((property) => property.identity)?.apiName;
+    if (!dataSource || !objectMapping || !identityProperty) throw new Error("The primary object mapping needs an ontology identity property.");
+    const links = linkMappings.filter((link) => link.sourceObjectMappingId === objectMapping.id).map((link) => {
+      const linkType = linkForMapping(link, objectMappings, ontology);
+      const targetType = ontology.objectTypes.find((type) => type.apiName === linkType?.targetType);
+      const targetIdentityProperty = targetType?.properties.find((property) => property.identity)?.apiName;
+      if (!linkType || !targetType || !targetIdentityProperty) throw new Error(`Link mapping '${link.linkType}' has no valid target identity.`);
+      return { sourceField: link.sourceField, linkType: link.linkType, targetObjectType: targetType.apiName, targetIdentityProperty };
+    });
+    return {
+      id: backendMappingId || undefined,
+      ontologyId,
+      dataSourceId: dataSource.id,
+      name: `${fileName} → ${objectType.displayName}`,
+      objectMapping: { objectType: objectMapping.objectType, identityProperty, properties: objectMapping.properties },
+      links,
+    };
   }
 
-  function importRecords() {
-    const graph = createGraph(); onImport(graph);
-    setMessage(`${graph.nodes.length.toLocaleString("de-DE")} objects and ${graph.links.length.toLocaleString("de-DE")} ontology links imported.`);
+  async function persistMapping() {
+    const saved = await saveOntologyMapping(backendMapping());
+    const nextRevision = revision + 1;
+    localStorage.setItem(`context-hub.mapping.${ontologyId}`, JSON.stringify({ revision: nextRevision, backendMappingId: saved.id, fileName, objectMappings, linkMappings }));
+    setBackendMappingId(saved.id); setRevision(nextRevision);
+    return saved;
+  }
+
+  async function saveMapping() {
+    setBusy(true);
+    try {
+      await persistMapping();
+      setMessage(`Mapping revision ${revision + 1} saved in ClickHouse.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "The mapping could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importRecords() {
+    setBusy(true);
+    try {
+      setMessage("Publishing ontology and saving mapping…");
+      const version = await publishOntologyCatalog({ id: ontologyId, name: ontologyName, slug: ontologySlug }, ontology);
+      const mapping = await persistMapping();
+      setMessage("DataFusion ingestion is running…");
+      const job = await startIngestion(dataSource!.id, mapping.id, version.id);
+      if (job.state !== IngestionState.SUCCEEDED) throw new Error(job.error || "The ingestion job did not complete successfully.");
+      const graph = createGraph(); onImport(graph);
+      setMessage(`${job.nodesWritten.toLocaleString("de-DE")} objects and ${job.edgesWritten.toLocaleString("de-DE")} links persisted in ClickHouse.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "The import could not be completed.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return <div className="workspace-view mapping-view">
-    <header className="stage-header"><div><span className="eyebrow">Ontology mapping</span><h1>File import</h1><p>Bind source fields to object properties and link types from the current ontology draft.</p></div><div className="header-actions"><span className="save-state">Revision {revision}</span><label className="button secondary file-button"><Upload size={15}/> Choose file<input type="file" accept=".json,.jsonl,.ndjson,.csv,application/json,text/csv" onChange={loadFile}/></label><button className="button secondary" disabled={!records.length} onClick={() => setPreviewGraph(createGraph())}><Play size={15}/> Preview</button><button className="button secondary" disabled={!records.length} onClick={saveMapping}><Save size={15}/> Save mapping</button><button className="button primary" disabled={!records.length || !objectMappings.length} onClick={importRecords}><CheckCircle2 size={15}/> Import</button></div></header>
+    <header className="stage-header"><div><span className="eyebrow">Ontology mapping</span><h1>File import</h1><p>Bind source fields to object properties and link types from the current ontology draft.</p></div><div className="header-actions"><span className="save-state">Revision {revision}</span><label className="button secondary file-button"><Upload size={15}/> Choose file<input type="file" accept=".json,.jsonl,.ndjson,.csv,application/json,text/csv" onChange={loadFile}/></label><button className="button secondary" disabled={!records.length || busy} onClick={() => setPreviewGraph(createGraph())}><Play size={15}/> Preview</button><button className="button secondary" disabled={!records.length || busy} onClick={saveMapping}><Save size={15}/> Save mapping</button><button className="button primary" disabled={!records.length || !objectMappings.length || busy} onClick={importRecords}><CheckCircle2 size={15}/> {busy ? "Working…" : "Import"}</button></div></header>
     <div className="import-status" role="status">{message}</div>
     <div className="mapping-grid">
       <section className="source-card"><div className="card-title"><FileJson2 size={18}/><div><strong>{fileName || "No file selected"}</strong><span>{records.length ? `${records.length.toLocaleString("de-DE")} actual records` : "JSON · NDJSON · CSV"}</span></div></div><span className="eyebrow">Detected fields</span>{sourceFields.map((field) => <div className="schema-field" key={field}><code>{field}</code><span>{detectType(records, field)}</span></div>)}</section>

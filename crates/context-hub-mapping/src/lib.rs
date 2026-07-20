@@ -343,13 +343,16 @@ pub async fn execute_source_mapping(
             else {
                 continue;
             };
-            result.edges.push(MappedEdge {
-                link_type: link.link_type.clone(),
-                source_id: object_id.clone(),
-                target_object_type: link.target_object_type.clone(),
-                target_id: stable_object_id(&link.target_object_type, &target_values),
-                properties_json: "{}".into(),
-            });
+            for expanded in expand_link_values(&target_values) {
+                let expanded = expanded.iter().collect::<Vec<_>>();
+                result.edges.push(MappedEdge {
+                    link_type: link.link_type.clone(),
+                    source_id: object_id.clone(),
+                    target_object_type: link.target_object_type.clone(),
+                    target_id: stable_object_id(&link.target_object_type, &expanded),
+                    properties_json: "{}".into(),
+                });
+            }
         }
     }
     Ok(result)
@@ -467,6 +470,26 @@ fn stable_object_id(object_type: &str, values: &[&serde_json::Value]) -> String 
         .collect::<Vec<_>>()
         .join("|");
     format!("{object_type}:{identity}")
+}
+
+fn expand_link_values(values: &[&serde_json::Value]) -> Vec<Vec<serde_json::Value>> {
+    let array_length = values
+        .iter()
+        .filter_map(|value| value.as_array().map(Vec::len))
+        .max();
+    let length = array_length.unwrap_or(1);
+    (0..length)
+        .filter_map(|index| {
+            values
+                .iter()
+                .map(|value| match value {
+                    serde_json::Value::Array(items) => items.get(index).cloned(),
+                    scalar => Some((*scalar).clone()),
+                })
+                .collect::<Option<Vec<_>>>()
+                .filter(|expanded| expanded.iter().all(|value| !value.is_null()))
+        })
+        .collect()
 }
 
 fn compile_transform(input: String, transform: &Transform) -> Result<String, MappingError> {
@@ -667,7 +690,7 @@ mod tests {
             links: vec![LinkMapping {
                 link_type: "owned_by".into(),
                 target_object_type: "team".into(),
-                source_fields: vec!["team_id".into()],
+                source_fields: vec!["team_ids".into()],
                 target_identity_fields: vec!["id".into()],
             }],
             row_filter: None,
@@ -675,7 +698,7 @@ mod tests {
         let mapped = execute_source_mapping(
             &plan,
             SourceFormat::Json,
-            br#"[{"service_id":" billing ","service_name":" Billing API ","team_id":"payments"}]"#,
+            br#"[{"service_id":" billing ","service_name":" Billing API ","team_ids":["payments","platform"]}]"#,
         )
         .await
         .expect("JSON records can be mapped through DataFusion");
@@ -684,7 +707,9 @@ mod tests {
         assert_eq!(mapped.rows_rejected, 0);
         assert_eq!(mapped.nodes[0].object_id, "service:billing");
         assert!(mapped.nodes[0].properties_json.contains("Billing API"));
+        assert_eq!(mapped.edges.len(), 2);
         assert_eq!(mapped.edges[0].source_id, "service:billing");
         assert_eq!(mapped.edges[0].target_id, "team:payments");
+        assert_eq!(mapped.edges[1].target_id, "team:platform");
     }
 }
