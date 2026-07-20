@@ -1109,6 +1109,8 @@ impl GraphService for Runtime {
         let storage_query = graph_query_to_storage(&query, limit)?;
         let mut nodes_by_key = HashMap::new();
         let mut truncated = false;
+        let depth_count = storage_query.traversal.len() + 1;
+        let per_depth_limit = (limit / u32::try_from(depth_count).unwrap_or(1)).max(1);
         for depth in 0..=storage_query.traversal.len() {
             let remaining = limit as usize - nodes_by_key.len();
             if remaining == 0 {
@@ -1117,8 +1119,10 @@ impl GraphService for Runtime {
             }
             let mut prefix = storage_query.clone();
             prefix.traversal.truncate(depth);
-            prefix.limit = u32::try_from(remaining)
-                .expect("remaining node budget never exceeds the validated u32 query limit");
+            prefix.limit = per_depth_limit.min(
+                u32::try_from(remaining)
+                    .expect("remaining node budget never exceeds the validated u32 query limit"),
+            );
             let prefix_nodes = self
                 .graph
                 .query_nodes(&prefix)

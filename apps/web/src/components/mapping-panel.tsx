@@ -270,7 +270,7 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
       const targetType = ontology.objectTypes.find((type) => type.apiName === linkType?.targetType);
       const targetIdentityProperty = targetType?.properties.find((property) => property.identity)?.apiName;
       if (!linkType || !targetType || !targetIdentityProperty) throw new Error(`Link mapping '${link.linkType}' has no valid target identity.`);
-      return { sourceField: link.sourceField, linkType: link.linkType, targetObjectType: targetType.apiName, targetIdentityProperty };
+      return { sourceField: link.sourceField, linkType: link.linkType, targetObjectType: targetType.apiName, targetIdentityProperty, missingTarget: link.missingTarget };
     });
     return {
       id: backendMappingId || undefined,

@@ -78,6 +78,17 @@ pub struct LinkMapping {
     pub target_object_type: String,
     pub source_fields: Vec<String>,
     pub target_identity_fields: Vec<String>,
+    #[serde(default)]
+    pub missing_target: MissingTargetStrategy,
+}
+
+#[derive(Debug, Clone, Default, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingTargetStrategy {
+    #[default]
+    Create,
+    Skip,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -175,6 +186,17 @@ pub enum MappingError {
     Json(#[from] serde_json::Error),
     #[error("source must contain object records")]
     InvalidSource,
+    #[error("link '{link_type}' targets missing object '{target_id}'")]
+    MissingLinkTarget {
+        link_type: String,
+        target_id: String,
+    },
+}
+
+struct PendingEdge {
+    edge: MappedEdge,
+    missing_target: MissingTargetStrategy,
+    target_properties_json: String,
 }
 
 impl MappingPlan {
@@ -305,6 +327,7 @@ pub async fn execute_source_mapping(
         rows_read: rows_read as u64,
         ..MappedGraphBatch::default()
     };
+    let mut pending_edges = Vec::new();
     for row in rows {
         let Some(object) = row.as_object() else {
             result.rows_rejected += 1;
@@ -345,17 +368,67 @@ pub async fn execute_source_mapping(
             };
             for expanded in expand_link_values(&target_values) {
                 let expanded = expanded.iter().collect::<Vec<_>>();
-                result.edges.push(MappedEdge {
-                    link_type: link.link_type.clone(),
-                    source_id: object_id.clone(),
-                    target_object_type: link.target_object_type.clone(),
-                    target_id: stable_object_id(&link.target_object_type, &expanded),
-                    properties_json: "{}".into(),
+                let target_id = stable_object_id(&link.target_object_type, &expanded);
+                let target_properties = link
+                    .target_identity_fields
+                    .iter()
+                    .cloned()
+                    .zip(expanded.iter().map(|value| (*value).clone()))
+                    .collect::<serde_json::Map<_, _>>();
+                pending_edges.push(PendingEdge {
+                    edge: MappedEdge {
+                        link_type: link.link_type.clone(),
+                        source_id: object_id.clone(),
+                        target_object_type: link.target_object_type.clone(),
+                        target_id,
+                        properties_json: "{}".into(),
+                    },
+                    missing_target: link.missing_target,
+                    target_properties_json: serde_json::to_string(&target_properties)?,
                 });
             }
         }
     }
+    resolve_pending_edges(&mut result, pending_edges)?;
     Ok(result)
+}
+
+fn resolve_pending_edges(
+    result: &mut MappedGraphBatch,
+    pending_edges: Vec<PendingEdge>,
+) -> Result<(), MappingError> {
+    let mut known_nodes = result
+        .nodes
+        .iter()
+        .map(|node| (node.object_type.clone(), node.object_id.clone()))
+        .collect::<std::collections::HashSet<_>>();
+    for pending in pending_edges {
+        let target_key = (
+            pending.edge.target_object_type.clone(),
+            pending.edge.target_id.clone(),
+        );
+        if !known_nodes.contains(&target_key) {
+            match pending.missing_target {
+                MissingTargetStrategy::Create => {
+                    known_nodes.insert(target_key);
+                    result.nodes.push(MappedNode {
+                        object_type: pending.edge.target_object_type.clone(),
+                        object_id: pending.edge.target_id.clone(),
+                        properties_json: pending.target_properties_json,
+                    });
+                }
+                MissingTargetStrategy::Skip => continue,
+                MissingTargetStrategy::Error => {
+                    return Err(MappingError::MissingLinkTarget {
+                        link_type: pending.edge.link_type,
+                        target_id: pending.edge.target_id,
+                    });
+                }
+            }
+        }
+        result.edges.push(pending.edge);
+    }
+    Ok(())
 }
 
 fn worker_projection(plan: &MappingPlan) -> MappingPlan {
@@ -669,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn maps_json_records_to_nodes_and_links() {
-        let plan = MappingPlan {
+        let mut plan = MappingPlan {
             id: Uuid::nil(),
             object_type: "service".into(),
             identity_fields: vec!["service_id".into()],
@@ -692,6 +765,7 @@ mod tests {
                 target_object_type: "team".into(),
                 source_fields: vec!["team_ids".into()],
                 target_identity_fields: vec!["id".into()],
+                missing_target: MissingTargetStrategy::Create,
             }],
             row_filter: None,
         };
@@ -706,10 +780,34 @@ mod tests {
         assert_eq!(mapped.rows_read, 1);
         assert_eq!(mapped.rows_rejected, 0);
         assert_eq!(mapped.nodes[0].object_id, "service:billing");
+        assert_eq!(mapped.nodes.len(), 3);
         assert!(mapped.nodes[0].properties_json.contains("Billing API"));
         assert_eq!(mapped.edges.len(), 2);
         assert_eq!(mapped.edges[0].source_id, "service:billing");
         assert_eq!(mapped.edges[0].target_id, "team:payments");
         assert_eq!(mapped.edges[1].target_id, "team:platform");
+        assert_eq!(mapped.nodes[1].object_id, "team:payments");
+        assert_eq!(mapped.nodes[2].object_id, "team:platform");
+
+        plan.links[0].missing_target = MissingTargetStrategy::Skip;
+        let skipped = execute_source_mapping(
+            &plan,
+            SourceFormat::Json,
+            br#"[{"service_id":"billing","service_name":"Billing API","team_ids":["payments"]}]"#,
+        )
+        .await
+        .expect("missing targets can be skipped");
+        assert_eq!(skipped.nodes.len(), 1);
+        assert!(skipped.edges.is_empty());
+
+        plan.links[0].missing_target = MissingTargetStrategy::Error;
+        let error = execute_source_mapping(
+            &plan,
+            SourceFormat::Json,
+            br#"[{"service_id":"billing","service_name":"Billing API","team_ids":["payments"]}]"#,
+        )
+        .await
+        .expect_err("missing targets can fail the mapping");
+        assert!(matches!(error, MappingError::MissingLinkTarget { .. }));
     }
 }

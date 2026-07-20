@@ -1,21 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Boxes, DatabaseZap, Orbit, Plus, Workflow } from "lucide-react";
 import { GraphExplorer } from "@/components/graph-explorer";
 import { MappingPanel, type BrowserDataSource } from "@/components/mapping-panel";
 import { OntologyEditor } from "@/components/ontology-editor";
 import { emptyGraph, type ImportedGraph } from "@/lib/graph-data";
 import { defaultOntologyCatalog, type OntologyCatalog } from "@/lib/ontology-catalog";
-import { createWorkspaceOntology, listWorkspaceOntologies } from "@/lib/context-hub-client";
+import { createWorkspaceOntology, listWorkspaceOntologies, loadPersistedGraph } from "@/lib/context-hub-client";
 
 type Section = "ontology" | "mapping" | "graph";
-type OntologyWorkspace = { id: string; name: string; slug: string };
+type OntologyWorkspace = { id: string; name: string; slug: string; activeVersionId: string };
 
 const ontologyRegistryKey = "context-hub.ontology-registry";
-const defaultOntology: OntologyWorkspace = { id: "service-map", name: "Service map", slug: "service_map" };
+const defaultOntology: OntologyWorkspace = { id: "service-map", name: "Service map", slug: "service_map", activeVersionId: "" };
 const defaultRegistry = { ontologies: [defaultOntology], activeOntologyId: defaultOntology.id };
 const defaultRegistrySnapshot = JSON.stringify(defaultRegistry);
+const emptyOntologyCatalog: OntologyCatalog = { objectTypes: [], linkTypes: [] };
 const registryListeners = new Set<() => void>();
 let registryCache = defaultRegistrySnapshot;
 
@@ -66,12 +67,13 @@ export default function Home() {
   const [graphs, setGraphs] = useState<Record<string, ImportedGraph>>({});
   const [dataSources, setDataSources] = useState<BrowserDataSource[]>([]);
   const [activeDataSourceId, setActiveDataSourceId] = useState("");
+  const graphRequests = useRef(new Set<string>());
   const savedRegistry = useSyncExternalStore(subscribeToRegistry, registrySnapshot, () => defaultRegistrySnapshot);
   const registry = useMemo(() => parseRegistry(savedRegistry), [savedRegistry]);
   const ontologies = registry.ontologies;
   const activeOntologyId = ontologies.some((ontology) => ontology.id === registry.activeOntologyId) ? registry.activeOntologyId : ontologies[0].id;
   const activeOntology = ontologies.find((ontology) => ontology.id === activeOntologyId) ?? ontologies[0] ?? defaultOntology;
-  const activeCatalog = catalogs[activeOntology.id] ?? { objectTypes: [], linkTypes: [] };
+  const activeCatalog = catalogs[activeOntology.id] ?? emptyOntologyCatalog;
   const activeGraph = graphs[activeOntology.id] ?? emptyGraph;
   const activeDataSource = dataSources.find((source) => source.id === activeDataSourceId) ?? null;
   const updateActiveCatalog = useCallback((catalog: OntologyCatalog) => {
@@ -97,6 +99,15 @@ export default function Home() {
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (section !== "graph" || graphs[activeOntology.id] || !activeOntology.activeVersionId || !activeCatalog.objectTypes.length || graphRequests.current.has(activeOntology.id)) return;
+    graphRequests.current.add(activeOntology.id);
+    void loadPersistedGraph(activeOntology, activeCatalog)
+      .then((loaded) => setGraphs((items) => ({ ...items, [activeOntology.id]: loaded })))
+      .catch(() => undefined)
+      .finally(() => graphRequests.current.delete(activeOntology.id));
+  }, [activeCatalog, activeOntology, graphs, section]);
 
   async function createOntology() {
     const number = ontologies.length + 1;

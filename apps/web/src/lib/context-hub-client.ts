@@ -2,12 +2,14 @@ import { createClient } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import {
   DataSourceService,
+  GraphService,
   IngestionService,
   IngestionState,
   OntologyService,
   SourceFileFormat,
 } from "@/gen/context_hub/v1/context_hub_pb";
 import type { OntologyCatalog } from "@/lib/ontology-catalog";
+import type { GraphValue, ImportedGraph } from "@/lib/graph-data";
 
 export const DEV_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -19,8 +21,9 @@ const transport = createGrpcWebTransport({
 const dataSources = createClient(DataSourceService, transport);
 const ontologies = createClient(OntologyService, transport);
 const ingestions = createClient(IngestionService, transport);
+const graph = createClient(GraphService, transport);
 
-export type BackendOntology = { id: string; name: string; slug: string };
+export type BackendOntology = { id: string; name: string; slug: string; activeVersionId: string };
 
 export type BackendFieldMapping = {
   sourceField: string;
@@ -39,6 +42,7 @@ export type BackendLinkMapping = {
   linkType: string;
   targetObjectType: string;
   targetIdentityProperty: string;
+  missingTarget: "create" | "skip" | "error";
 };
 
 function sourceFormat(fileName: string): SourceFileFormat {
@@ -66,12 +70,12 @@ export async function uploadWorkspaceSource(file: File) {
 
 export async function listWorkspaceOntologies(): Promise<BackendOntology[]> {
   const response = await ontologies.list({ workspaceId: DEV_WORKSPACE_ID });
-  return response.ontologies.map((ontology) => ({ id: ontology.id, name: ontology.name, slug: ontology.slug }));
+  return response.ontologies.map((ontology) => ({ id: ontology.id, name: ontology.name, slug: ontology.slug, activeVersionId: ontology.activeVersionId }));
 }
 
 export async function createWorkspaceOntology(name: string, slug: string): Promise<BackendOntology> {
   const ontology = await ontologies.create({ workspaceId: DEV_WORKSPACE_ID, name, slug });
-  return { id: ontology.id, name: ontology.name, slug: ontology.slug };
+  return { id: ontology.id, name: ontology.name, slug: ontology.slug, activeVersionId: ontology.activeVersionId };
 }
 
 function ontologyDefinition(name: string, slug: string, catalog: OntologyCatalog) {
@@ -120,7 +124,7 @@ function scalarType(type: string) {
   return known[type] ?? "string";
 }
 
-export async function publishOntologyCatalog(ontology: BackendOntology, catalog: OntologyCatalog) {
+export async function publishOntologyCatalog(ontology: Pick<BackendOntology, "id" | "name" | "slug">, catalog: OntologyCatalog) {
   const current = await ontologies.getDraft({ id: ontology.id });
   const definitionJson = JSON.stringify(ontologyDefinition(ontology.name, ontology.slug, catalog));
   const saved = await ontologies.saveDraft({
@@ -161,6 +165,7 @@ function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapp
       target_object_type: link.targetObjectType,
       source_fields: [link.sourceField],
       target_identity_fields: [link.targetIdentityProperty],
+      missing_target: link.missingTarget,
     })),
     row_filter: null,
   };
@@ -192,4 +197,65 @@ export async function startIngestion(dataSourceId: string, mappingId: string, ve
     job = await ingestions.getJob({ id: job.id });
   }
   return job;
+}
+
+const graphColors = ["#7c9cff", "#5ed3b5", "#f7b267", "#c792ea", "#ff7d9d"];
+
+export async function loadPersistedGraph(ontology: BackendOntology, catalog: OntologyCatalog): Promise<ImportedGraph> {
+  if (!ontology.activeVersionId) throw new Error("This ontology has no published graph version yet.");
+  const requests = [
+    ...catalog.objectTypes.map((objectType) => graph.query({
+      workspaceId: DEV_WORKSPACE_ID,
+      ontologyVersionId: ontology.activeVersionId,
+      rootType: objectType.apiName,
+      filters: [], traversal: [], projection: [], limit: 5_000, cursor: "",
+    })),
+    ...catalog.linkTypes.map((link) => graph.query({
+      workspaceId: DEV_WORKSPACE_ID,
+      ontologyVersionId: ontology.activeVersionId,
+      rootType: link.sourceType,
+      filters: [],
+      traversal: [{ linkType: link.apiName, targetType: link.targetType, reverse: false }],
+      projection: [], limit: 5_000, cursor: "",
+    })),
+  ];
+  const responses = await Promise.all(requests);
+  const nodes = new Map<string, ImportedGraph["nodes"][number]>();
+  const links = new Map<string, ImportedGraph["links"][number]>();
+  for (const response of responses) {
+    for (const node of response.nodes) {
+      const objectType = catalog.objectTypes.find((type) => type.apiName === node.objectType);
+      const properties = JSON.parse(node.propertiesJson || "{}") as Record<string, GraphValue>;
+      const colorIndex = Math.max(0, catalog.objectTypes.findIndex((type) => type.apiName === node.objectType));
+      nodes.set(node.id, {
+        id: node.id,
+        name: String(properties.name ?? properties.id ?? node.id),
+        kind: objectType?.displayName ?? node.objectType,
+        group: objectType?.displayName ?? node.objectType,
+        color: graphColors[colorIndex % graphColors.length],
+        properties,
+      });
+    }
+    for (const edge of response.edges) {
+      links.set(edge.id, {
+        source: edge.sourceId,
+        target: edge.targetId,
+        label: edge.linkType,
+        properties: JSON.parse(edge.propertiesJson || "{}") as Record<string, GraphValue>,
+      });
+    }
+  }
+  return {
+    nodes: [...nodes.values()],
+    links: [...links.values()],
+    sourceName: `${ontology.name} · ClickHouse`,
+    importedAt: new Date().toISOString(),
+    recordCount: nodes.size,
+    skippedCount: 0,
+    linkErrorCount: 0,
+    ontologyBindings: {
+      objectTypes: catalog.objectTypes.map((type) => type.apiName),
+      linkTypes: catalog.linkTypes.map((type) => type.apiName),
+    },
+  };
 }
