@@ -28,7 +28,7 @@ pub async fn execute(
             (evaluate_expression(expression, &arguments)?, "expression")
         }
         FunctionImplementation::ExternalGrpc { endpoint, method } => (
-            execute_external(endpoint, method, function, &arguments).await?,
+            execute_external_provider(endpoint, method, &function.api_name, &arguments).await?,
             "external_grpc",
         ),
         FunctionImplementation::Wasm {
@@ -180,10 +180,22 @@ fn validate_scalar(scalar: &ScalarType, value: &Value, path: &str) -> Result<(),
         .ok_or_else(|| format!("{path} has the wrong type"))
 }
 
-async fn execute_external(
+pub async fn test_external_provider(
     endpoint: &str,
     method: &str,
-    function: &FunctionDefinition,
+    function_api_name: &str,
+    arguments: Value,
+) -> Result<Value, String> {
+    let Value::Object(arguments) = arguments else {
+        return Err("function arguments must be a JSON object".into());
+    };
+    execute_external_provider(endpoint, method, function_api_name, &arguments).await
+}
+
+async fn execute_external_provider(
+    endpoint: &str,
+    method: &str,
+    function_api_name: &str,
     arguments: &Map<String, Value>,
 ) -> Result<Value, String> {
     if method != "invoke" && method != "/context_hub.v1.ExternalFunctionService/Invoke" {
@@ -198,7 +210,7 @@ async fn execute_external(
     .map_err(|_| "external gRPC connection timed out".to_owned())?
     .map_err(|error| format!("external gRPC connection failed: {error}"))?;
     let request = ExternalFunctionRequest {
-        function_api_name: function.api_name.clone(),
+        function_api_name: function_api_name.to_owned(),
         arguments_json: Value::Object(arguments.clone()).to_string(),
     };
     let response = tokio::time::timeout(EXTERNAL_TIMEOUT, client.invoke(Request::new(request)))
@@ -211,6 +223,15 @@ async fn execute_external(
     }
     serde_json::from_str(&response.result_json)
         .map_err(|error| format!("external gRPC result is not valid JSON: {error}"))
+}
+
+pub fn validate_wasm_artifact(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err("WASM artifact exceeds 16 MiB".into());
+    }
+    let engine = Engine::new(&Config::default());
+    Module::new(&engine, bytes).map_err(|error| format!("WASM artifact is invalid: {error}"))?;
+    Ok(())
 }
 
 fn validate_external_endpoint(endpoint: &str) -> Result<(), String> {
@@ -461,6 +482,137 @@ struct Parser<'a> {
     lexer: Lexer<'a>,
     current: Token,
     arguments: &'a Map<String, Value>,
+}
+
+struct SyntaxParser<'a> {
+    lexer: Lexer<'a>,
+    current: Token,
+    arguments: &'a [&'a str],
+}
+
+impl<'a> SyntaxParser<'a> {
+    fn new(expression: &'a str, arguments: &'a [&'a str]) -> Result<Self, String> {
+        if expression.len() > 16_384 {
+            return Err("expression exceeds 16 KiB".into());
+        }
+        let mut lexer = Lexer {
+            source: expression.as_bytes(),
+            position: 0,
+        };
+        let current = lexer.next()?;
+        Ok(Self {
+            lexer,
+            current,
+            arguments,
+        })
+    }
+    fn advance(&mut self) -> Result<Token, String> {
+        Ok(std::mem::replace(&mut self.current, self.lexer.next()?))
+    }
+    fn parse(mut self) -> Result<(), String> {
+        self.or()?;
+        (self.current == Token::End)
+            .then_some(())
+            .ok_or_else(|| "unexpected token after expression".into())
+    }
+    fn or(&mut self) -> Result<(), String> {
+        self.and()?;
+        while self.current == Token::Or {
+            self.advance()?;
+            self.and()?;
+        }
+        Ok(())
+    }
+    fn and(&mut self) -> Result<(), String> {
+        self.compare()?;
+        while self.current == Token::And {
+            self.advance()?;
+            self.compare()?;
+        }
+        Ok(())
+    }
+    fn compare(&mut self) -> Result<(), String> {
+        self.term()?;
+        while matches!(
+            self.current,
+            Token::Eq
+                | Token::NotEq
+                | Token::Greater
+                | Token::GreaterEq
+                | Token::Less
+                | Token::LessEq
+        ) {
+            self.advance()?;
+            self.term()?;
+        }
+        Ok(())
+    }
+    fn term(&mut self) -> Result<(), String> {
+        self.factor()?;
+        while matches!(self.current, Token::Plus | Token::Minus) {
+            self.advance()?;
+            self.factor()?;
+        }
+        Ok(())
+    }
+    fn factor(&mut self) -> Result<(), String> {
+        self.unary()?;
+        while matches!(self.current, Token::Star | Token::Slash) {
+            self.advance()?;
+            self.unary()?;
+        }
+        Ok(())
+    }
+    fn unary(&mut self) -> Result<(), String> {
+        if self.current == Token::Minus {
+            self.advance()?;
+        }
+        self.primary()
+    }
+    fn primary(&mut self) -> Result<(), String> {
+        match self.advance()? {
+            Token::String(_) | Token::Number(_) | Token::True | Token::False | Token::Null => {
+                Ok(())
+            }
+            Token::Identifier(name) if self.current == Token::LeftParen => self.call(&name),
+            Token::Identifier(name) if self.arguments.contains(&name.as_str()) => Ok(()),
+            Token::Identifier(name) => Err(format!("unknown function argument '{name}'")),
+            Token::LeftParen => {
+                self.or()?;
+                (self.advance()? == Token::RightParen)
+                    .then_some(())
+                    .ok_or_else(|| "missing closing parenthesis".into())
+            }
+            _ => Err("expected a value".into()),
+        }
+    }
+    fn call(&mut self, name: &str) -> Result<(), String> {
+        self.advance()?;
+        let mut count = 0;
+        if self.current != Token::RightParen {
+            loop {
+                self.or()?;
+                count += 1;
+                if self.current != Token::Comma {
+                    break;
+                }
+                self.advance()?;
+            }
+        }
+        if self.advance()? != Token::RightParen {
+            return Err("missing closing function parenthesis".into());
+        }
+        match name {
+            "concat" | "coalesce" => Ok(()),
+            "lower" | "upper" | "trim" | "length" if count == 1 => Ok(()),
+            "lower" | "upper" | "trim" | "length" => Err(format!("{name} expects one argument")),
+            _ => Err(format!("unknown controlled function '{name}'")),
+        }
+    }
+}
+
+pub fn validate_expression(expression: &str, arguments: &[&str]) -> Result<(), String> {
+    SyntaxParser::new(expression, arguments)?.parse()
 }
 
 impl<'a> Parser<'a> {
@@ -739,6 +891,43 @@ mod tests {
     fn rejects_unknown_expression_functions() {
         let error = evaluate_expression("shell('nope')", &Map::new()).unwrap_err();
         assert!(error.contains("unknown controlled function"));
+    }
+
+    #[test]
+    fn validates_expression_syntax_without_executing_it() {
+        validate_expression(
+            "concat(upper(trim(name)), ':', count + 2)",
+            &["name", "count"],
+        )
+        .unwrap();
+        assert!(
+            validate_expression("concat(missing)", &["name"])
+                .unwrap_err()
+                .contains("unknown")
+        );
+        assert!(
+            validate_expression("lower(name, name)", &["name"])
+                .unwrap_err()
+                .contains("one argument")
+        );
+        assert!(
+            validate_expression("concat(name", &["name"])
+                .unwrap_err()
+                .contains("closing")
+        );
+    }
+
+    #[tokio::test]
+    async fn validates_external_provider_contract_before_connecting() {
+        let error = test_external_provider(
+            "http://127.0.0.1:50052",
+            "unsupported",
+            "greeting",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("Invoke contract"));
     }
 
     #[test]

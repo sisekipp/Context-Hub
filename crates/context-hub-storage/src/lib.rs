@@ -375,6 +375,48 @@ pub struct StoredIngestionEvent {
     pub occurred_at_micros: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredFunctionArtifact {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub file_name: String,
+    pub object_key: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub revision: u64,
+    pub created_at_micros: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredFunctionExecution {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub ontology_version_id: Uuid,
+    pub function_api_name: String,
+    pub executor: String,
+    pub state: i32,
+    pub arguments_json: String,
+    pub result_json: String,
+    pub error: String,
+    pub duration_millis: u64,
+    pub executed_at_micros: i64,
+}
+
+#[derive(Debug, Deserialize, clickhouse::Row)]
+struct FunctionExecutionRow {
+    id: String,
+    ontology_version_id: String,
+    function_api_name: String,
+    executor: String,
+    state: i32,
+    arguments_json: String,
+    result_json: String,
+    error: String,
+    duration_millis: u64,
+    executed_at_micros: i64,
+}
+
 #[async_trait]
 pub trait ControlPlaneRepository: Send + Sync {
     async fn load(&self, workspace_id: Uuid) -> Result<ControlPlaneSnapshot, StorageError>;
@@ -395,6 +437,29 @@ pub trait ControlPlaneRepository: Send + Sync {
         job_id: Uuid,
         limit: u32,
     ) -> Result<Vec<StoredIngestionEvent>, StorageError>;
+    async fn save_function_artifact(
+        &self,
+        value: &StoredFunctionArtifact,
+    ) -> Result<(), StorageError>;
+    async fn delete_function_artifact(
+        &self,
+        value: &StoredFunctionArtifact,
+    ) -> Result<(), StorageError>;
+    async fn list_function_artifacts(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<StoredFunctionArtifact>, StorageError>;
+    async fn append_function_execution(
+        &self,
+        value: &StoredFunctionExecution,
+    ) -> Result<(), StorageError>;
+    async fn list_function_executions(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Option<Uuid>,
+        function_api_name: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredFunctionExecution>, StorageError>;
 }
 
 #[derive(Clone)]
@@ -653,6 +718,95 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
             .into_iter().map(|row| Ok(StoredIngestionEvent {
                 workspace_id, job_id, source_id: parse_uuid(&row.0, "source id")?, event_type: row.1, row_number: row.2, object_type: row.3, external_id: row.4, message: row.5, details_json: row.6, occurred_at_micros: row.7,
             })).collect()
+    }
+
+    async fn save_function_artifact(
+        &self,
+        value: &StoredFunctionArtifact,
+    ) -> Result<(), StorageError> {
+        self.write_function_artifact(value, false).await
+    }
+
+    async fn delete_function_artifact(
+        &self,
+        value: &StoredFunctionArtifact,
+    ) -> Result<(), StorageError> {
+        self.write_function_artifact(value, true).await
+    }
+
+    async fn list_function_artifacts(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<StoredFunctionArtifact>, StorageError> {
+        self.client.query("SELECT toString(id), name, file_name, object_key, size_bytes, toString(sha256), revision, toUnixTimestamp64Micro(created_at) FROM function_artifacts FINAL WHERE workspace_id = ? AND deleted = false ORDER BY created_at DESC")
+            .bind(workspace_id.to_string())
+            .fetch_all::<(String, String, String, String, u64, String, u64, i64)>().await?
+            .into_iter().map(|row| Ok(StoredFunctionArtifact {
+                id: parse_uuid(&row.0, "function artifact id")?, workspace_id, name: row.1,
+                file_name: row.2, object_key: row.3, size_bytes: row.4, sha256: row.5,
+                revision: row.6, created_at_micros: row.7,
+            })).collect()
+    }
+
+    async fn append_function_execution(
+        &self,
+        value: &StoredFunctionExecution,
+    ) -> Result<(), StorageError> {
+        let state = match value.state {
+            1 => "succeeded",
+            2 => "failed",
+            _ => {
+                return Err(StorageError::InvalidRecord(format!(
+                    "unsupported function execution state {}",
+                    value.state
+                )));
+            }
+        };
+        self.insert_json("INSERT INTO function_executions (id, workspace_id, ontology_version_id, function_api_name, executor, state, arguments_json, result_json, error, duration_millis, executed_at) FORMAT JSONEachRow", serde_json::json!({
+            "id": value.id, "workspace_id": value.workspace_id, "ontology_version_id": value.ontology_version_id,
+            "function_api_name": value.function_api_name, "executor": value.executor, "state": state,
+            "arguments_json": value.arguments_json, "result_json": value.result_json, "error": value.error,
+            "duration_millis": value.duration_millis,
+            "executed_at": timestamp_from_micros(value.executed_at_micros)?.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+        })).await
+    }
+
+    async fn list_function_executions(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Option<Uuid>,
+        function_api_name: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredFunctionExecution>, StorageError> {
+        let version_filter = u8::from(ontology_version_id.is_some());
+        let version = ontology_version_id.unwrap_or_else(Uuid::nil).to_string();
+        let function_filter = u8::from(function_api_name.is_some());
+        let function = function_api_name.unwrap_or_default();
+        self.client.query("SELECT toString(id) AS id, toString(ontology_version_id) AS ontology_version_id, function_api_name, executor, toInt32(state) AS state, arguments_json, result_json, error, duration_millis, toUnixTimestamp64Micro(executed_at) AS executed_at_micros FROM function_executions WHERE workspace_id = ? AND (? = 0 OR ontology_version_id = toUUID(?)) AND (? = 0 OR function_api_name = ?) ORDER BY executed_at DESC LIMIT ?")
+            .bind(workspace_id.to_string()).bind(version_filter).bind(&version).bind(function_filter).bind(function).bind(limit.clamp(1, 500))
+            .fetch_all::<FunctionExecutionRow>().await?
+            .into_iter().map(|row| Ok(StoredFunctionExecution {
+                id: parse_uuid(&row.id, "function execution id")?, workspace_id,
+                ontology_version_id: parse_uuid(&row.ontology_version_id, "ontology version id")?,
+                function_api_name: row.function_api_name, executor: row.executor, state: row.state,
+                arguments_json: row.arguments_json, result_json: row.result_json, error: row.error,
+                duration_millis: row.duration_millis, executed_at_micros: row.executed_at_micros,
+            })).collect()
+    }
+}
+
+impl ClickHouseControlPlaneRepository {
+    async fn write_function_artifact(
+        &self,
+        value: &StoredFunctionArtifact,
+        deleted: bool,
+    ) -> Result<(), StorageError> {
+        self.insert_json("INSERT INTO function_artifacts (id, workspace_id, name, file_name, object_key, size_bytes, sha256, revision, deleted, created_at) FORMAT JSONEachRow", serde_json::json!({
+            "id": value.id, "workspace_id": value.workspace_id, "name": value.name,
+            "file_name": value.file_name, "object_key": value.object_key, "size_bytes": value.size_bytes,
+            "sha256": value.sha256, "revision": value.revision, "deleted": deleted,
+            "created_at": timestamp_from_micros(value.created_at_micros)?.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+        })).await
     }
 }
 

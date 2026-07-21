@@ -19,7 +19,7 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - Durable ClickHouse control-plane repositories for ontology drafts/versions, data-source metadata, ontology-specific mappings, and ingestion jobs, including runtime reload after restart.
 - Ontology-scoped import history with durable field/row events, safe retries, and source-field provenance in the Explorer property inspector.
 - gRPC and gRPC-Web contracts for workspaces, ontologies, data sources, ingestion, and graph queries.
-- Published, type-checked read-only Function execution through controlled expressions, allowlisted external gRPC providers, or fuel- and memory-limited WASM modules.
+- Published, type-checked read-only Function execution through publish-validated controlled expressions, testable allowlisted external gRPC providers, or managed, fuel- and memory-limited WASM modules. Function executions and failures are retained in ClickHouse.
 - Read-only MCP tools for schema discovery and graph access.
 - A Next.js frontend with a backend-persisted React Flow ontology editor, revisioned ontology-bound JSON/NDJSON/CSV/Parquet object and link mappings, and a connected 2D/3D graph explorer.
 - A workspace ontology switcher: users can create multiple isolated ontologies, while data-source definitions remain reusable at workspace level and mappings remain ontology-specific.
@@ -27,12 +27,11 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 
 ## Quick start
 
-The preferred path is **Dev Containers: Reopen in Container**. The post-create hook installs JavaScript and Rust dependencies and generates the TypeScript Protobuf files.
+The preferred path is **Dev Containers: Reopen in Container**. Docker Compose starts ClickHouse and MinIO, while the post-create hook installs JavaScript and Rust dependencies and generates the TypeScript Protobuf files.
 
 Inside the container:
 
 ```bash
-mise run db:up
 mise run dev:api
 mise run dev:mcp
 mise run dev:web
@@ -74,7 +73,7 @@ The Explorer includes a visual graph-query builder for ontology-validated filter
 
 The **Imports** view shows durable job history, counters, timestamps, field/row errors, source details, and a retry action that creates a separate audit record. Selecting a graph node resolves each directly mapped property back to its shared source, source field, mapping, and successful ingestion job. See [Import history and provenance](docs/import-history-provenance.md).
 
-The ontology editor publishes Function definitions with typed inputs and outputs and can execute the published version from its inspector. Expressions use a fixed language rather than SQL or shell access. External providers implement the `ExternalFunctionService` envelope and must be included in `FUNCTION_GRPC_ALLOWLIST`; WASM artifacts are read from MinIO and execute without WASI or host imports. See [Function execution](docs/function-execution.md).
+The ontology editor publishes Function definitions with typed inputs and outputs and can execute the published version from its inspector. Function nodes can be duplicated or deleted. Expressions use a fixed language rather than SQL or shell access and are validated during publish. External providers implement the `ExternalFunctionService` envelope and can be tested before publishing; WASM artifacts are uploaded and managed in the inspector, read from MinIO, and execute without WASI or host imports. Execution results and detailed failures are available in the Function history. See [Function execution](docs/function-execution.md).
 
 Ontology canvas state is stored with the definition in the revisioned ClickHouse draft. The editor reconstructs older definitions that have no compatible layout, migrates legacy browser-local drafts once, and autosaves only documents that differ from the last backend-confirmed state. Object types, links, interfaces, value types, structs, shared and derived properties, and Functions survive reloads without being flattened. Node/property deletion and bounded Undo/Redo are available before publish.
 

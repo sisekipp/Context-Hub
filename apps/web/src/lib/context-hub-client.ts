@@ -5,6 +5,7 @@ import {
   DataSourceKind,
   AggregationFunction,
   FilterOperator,
+  FunctionExecutionState,
   FunctionService,
   GraphService,
   IngestionService,
@@ -41,6 +42,8 @@ export type BackendIngestionJob = {
 };
 export type BackendIngestionEvent = { eventType: string; rowNumber: number; objectType: string; externalId: string; message: string; detailsJson: string; occurredAt: Date | null };
 export type BackendPropertyProvenance = { property: string; dataSourceId: string; dataSourceName: string; sourceField: string; ontologyMappingId: string; ontologyMappingName: string; ingestionJobId: string; importedAt: Date | null };
+export type BackendFunctionArtifact = { id: string; name: string; fileName: string; artifactUri: string; sizeBytes: number; sha256: string; createdAt: Date | null };
+export type BackendFunctionExecution = { id: string; ontologyVersionId: string; functionApiName: string; executor: string; state: FunctionExecutionState; argumentsJson: string; resultJson: string; error: string; durationMillis: number; executedAt: Date | null };
 export type RestKeyValue = { key: string; value: string };
 export type RestSourceInput = {
   id?: string;
@@ -460,7 +463,48 @@ export async function executeOntologyFunction(ontologyVersionId: string, functio
     functionApiName,
     argumentsJson,
   });
-  return { resultJson: response.resultJson, executor: response.executor, durationMillis: Number(response.durationMillis) };
+  return { resultJson: response.resultJson, executor: response.executor, durationMillis: Number(response.durationMillis), executionId: response.executionId };
+}
+
+export async function uploadFunctionArtifact(file: File): Promise<BackendFunctionArtifact> {
+  const artifact = await functions.uploadArtifact({
+    workspaceId: DEV_WORKSPACE_ID,
+    name: file.name.replace(/\.wasm$/i, "") || file.name,
+    fileName: file.name,
+    content: new Uint8Array(await file.arrayBuffer()),
+  });
+  return backendFunctionArtifact(artifact);
+}
+
+function backendFunctionArtifact(artifact: Awaited<ReturnType<typeof functions.uploadArtifact>>): BackendFunctionArtifact {
+  return {
+    id: artifact.id, name: artifact.name, fileName: artifact.fileName, artifactUri: artifact.artifactUri,
+    sizeBytes: Number(artifact.sizeBytes), sha256: artifact.sha256, createdAt: protoDate(artifact.createdAt),
+  };
+}
+
+export async function listFunctionArtifacts(): Promise<BackendFunctionArtifact[]> {
+  const response = await functions.listArtifacts({ workspaceId: DEV_WORKSPACE_ID });
+  return response.artifacts.map(backendFunctionArtifact);
+}
+
+export async function deleteFunctionArtifact(id: string) {
+  await functions.deleteArtifact({ workspaceId: DEV_WORKSPACE_ID, id });
+}
+
+export async function testExternalFunctionProvider(endpoint: string, method: string, functionApiName: string, argumentsJson: string) {
+  const response = await functions.testExternalProvider({ workspaceId: DEV_WORKSPACE_ID, endpoint, method, functionApiName, argumentsJson });
+  return { resultJson: response.resultJson, durationMillis: Number(response.durationMillis) };
+}
+
+export async function listFunctionExecutions(ontologyVersionId: string, functionApiName: string): Promise<BackendFunctionExecution[]> {
+  const response = await functions.listExecutions({ workspaceId: DEV_WORKSPACE_ID, ontologyVersionId, functionApiName, limit: 50 });
+  return response.executions.map((execution) => ({
+    id: execution.id, ontologyVersionId: execution.ontologyVersionId, functionApiName: execution.functionApiName,
+    executor: execution.executor, state: execution.state, argumentsJson: execution.argumentsJson,
+    resultJson: execution.resultJson, error: execution.error, durationMillis: Number(execution.durationMillis),
+    executedAt: protoDate(execution.executedAt),
+  }));
 }
 
 export function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapping[]) {

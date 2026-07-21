@@ -99,7 +99,69 @@ message ExecuteFunctionResponse {
   string result_json = 1;
   string executor = 2;
   uint64 duration_millis = 3;
+  string execution_id = 4;
 }
+
+message FunctionArtifact {
+  string id = 1;
+  string workspace_id = 2;
+  string name = 3;
+  string file_name = 4;
+  string artifact_uri = 5;
+  uint64 size_bytes = 6;
+  string sha256 = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+message UploadFunctionArtifactRequest {
+  string workspace_id = 1;
+  string name = 2;
+  string file_name = 3;
+  bytes content = 4;
+}
+message ListFunctionArtifactsRequest { string workspace_id = 1; }
+message ListFunctionArtifactsResponse { repeated FunctionArtifact artifacts = 1; }
+message DeleteFunctionArtifactRequest {
+  string workspace_id = 1;
+  string id = 2;
+}
+
+message TestExternalFunctionProviderRequest {
+  string workspace_id = 1;
+  string endpoint = 2;
+  string method = 3;
+  string function_api_name = 4;
+  string arguments_json = 5;
+}
+message TestExternalFunctionProviderResponse {
+  string result_json = 1;
+  uint64 duration_millis = 2;
+}
+
+enum FunctionExecutionState {
+  FUNCTION_EXECUTION_STATE_UNSPECIFIED = 0;
+  FUNCTION_EXECUTION_STATE_SUCCEEDED = 1;
+  FUNCTION_EXECUTION_STATE_FAILED = 2;
+}
+message FunctionExecution {
+  string id = 1;
+  string workspace_id = 2;
+  string ontology_version_id = 3;
+  string function_api_name = 4;
+  string executor = 5;
+  FunctionExecutionState state = 6;
+  string arguments_json = 7;
+  string result_json = 8;
+  string error = 9;
+  uint64 duration_millis = 10;
+  google.protobuf.Timestamp executed_at = 11;
+}
+message ListFunctionExecutionsRequest {
+  string workspace_id = 1;
+  string ontology_version_id = 2;
+  string function_api_name = 3;
+  uint32 limit = 4;
+}
+message ListFunctionExecutionsResponse { repeated FunctionExecution executions = 1; }
 
 // Standard envelope implemented by remote ContextHub function providers. The provider is
 // responsible only for computation; ContextHub validates both input and output types.
@@ -112,6 +174,11 @@ message ExternalFunctionResponse { string result_json = 1; }
 
 service FunctionService {
   rpc Execute(ExecuteFunctionRequest) returns (ExecuteFunctionResponse);
+  rpc UploadArtifact(UploadFunctionArtifactRequest) returns (FunctionArtifact);
+  rpc ListArtifacts(ListFunctionArtifactsRequest) returns (ListFunctionArtifactsResponse);
+  rpc DeleteArtifact(DeleteFunctionArtifactRequest) returns (google.protobuf.Empty);
+  rpc TestExternalProvider(TestExternalFunctionProviderRequest) returns (TestExternalFunctionProviderResponse);
+  rpc ListExecutions(ListFunctionExecutionsRequest) returns (ListFunctionExecutionsResponse);
 }
 
 service ExternalFunctionService {

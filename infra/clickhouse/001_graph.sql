@@ -171,6 +171,35 @@ CREATE TABLE IF NOT EXISTS context_hub.ingestion_events (
 ) ENGINE = MergeTree
 ORDER BY (workspace_id, job_id, occurred_at, row_number);
 
+CREATE TABLE IF NOT EXISTS context_hub.function_artifacts (
+  id UUID,
+  workspace_id UUID,
+  name String,
+  file_name String,
+  object_key String,
+  size_bytes UInt64,
+  sha256 FixedString(64),
+  revision UInt64,
+  deleted Bool DEFAULT false,
+  created_at DateTime64(6, 'UTC') DEFAULT now64(6)
+) ENGINE = ReplacingMergeTree(revision, deleted)
+ORDER BY (workspace_id, id);
+
+CREATE TABLE IF NOT EXISTS context_hub.function_executions (
+  id UUID,
+  workspace_id UUID,
+  ontology_version_id UUID,
+  function_api_name LowCardinality(String),
+  executor LowCardinality(String),
+  state Enum8('succeeded' = 1, 'failed' = 2),
+  arguments_json String,
+  result_json String,
+  error String,
+  duration_millis UInt64,
+  executed_at DateTime64(6, 'UTC') DEFAULT now64(6)
+) ENGINE = MergeTree
+ORDER BY (workspace_id, ontology_version_id, function_api_name, executed_at, id);
+
 INSERT INTO context_hub.workspaces (id, name, slug, revision)
 SELECT toUUID('00000000-0000-0000-0000-000000000001'), 'Development', 'development', 1
 WHERE NOT EXISTS (

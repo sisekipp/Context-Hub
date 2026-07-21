@@ -5,8 +5,9 @@ import {
   Background, BackgroundVariant, Controls, Handle, MiniMap, Position, ReactFlow, addEdge,
   useEdgesState, useNodesState, type Connection, type Edge, type Node, type NodeProps,
 } from "@xyflow/react";
-import { Braces, Check, CircleDot, Code2, Component, GitFork, Link2, Plus, Redo2, Save, Send, Share2, Trash2, Undo2, X } from "lucide-react";
-import { executeOntologyFunction, loadOntologyDraft, publishSavedOntologyDraft, saveOntologyCatalogDraft } from "@/lib/context-hub-client";
+import { Braces, Check, CircleDot, Code2, Component, Copy, GitFork, Link2, Plus, Redo2, Save, Send, Share2, Trash2, Undo2, X } from "lucide-react";
+import { FunctionTools } from "@/components/function-tools";
+import { loadOntologyDraft, publishSavedOntologyDraft, saveOntologyCatalogDraft } from "@/lib/context-hub-client";
 import type { OntologyCatalog } from "@/lib/ontology-catalog";
 import { ontologyDocumentFromBackend } from "@/lib/ontology-document";
 
@@ -125,9 +126,6 @@ function HydratedOntologyEditor({ ontologyId, ontologyName, ontologySlug = ontol
   const [saveState, setSaveState] = useState("Autosave on");
   const [notice, setNotice] = useState<string | null>(null);
   const [publishedVersionId, setPublishedVersionId] = useState("");
-  const [functionArguments, setFunctionArguments] = useState("{}");
-  const [functionResult, setFunctionResult] = useState("");
-  const [functionBusy, setFunctionBusy] = useState(false);
   const [draftReady, setDraftReady] = useState(false);
   const draftRevision = useRef(0);
   const saveChain = useRef<Promise<number>>(Promise.resolve(0));
@@ -277,7 +275,7 @@ function HydratedOntologyEditor({ ontologyId, ontologyName, ontologySlug = ontol
     const count = nodes.filter((node) => node.data.kind === kind).length + 1;
     const id = `${kind}-${crypto.randomUUID()}`;
     const label = kindMeta[kind].label;
-    const properties: Property[] = kind === "object" ? [{ name: "id", type: "String", identity: true }] : kind === "value_type" ? [{ name: "base_type", type: "String" }] : kind === "shared_property" ? [{ name: "value", type: "String", shared: true }] : [];
+    const properties: Property[] = kind === "object" ? [{ name: "id", type: "String", identity: true }] : kind === "value_type" ? [{ name: "base_type", type: "String" }] : kind === "shared_property" ? [{ name: "value", type: "String", shared: true }] : kind === "function" ? [{ name: "name", type: "String", required: true }] : [];
     setNodes((items) => [...items, { id, type: "ontology", position: { x: 130 + count * 42, y: 100 + count * 48 }, data: { kind, displayName: `${label} ${count}`, apiName: `${kind}_${count}`, description: "", properties, ...(kind === "function" ? { functionOutput: "String", implementation: "expression", functionExpression: "concat('Hello ', name)", endpoint: "http://localhost:50061", method: "invoke", artifactUri: "object://functions/example.wasm", entrypoint: "run" } : {}) } }]);
     setSelectedEdgeId(null); setSelectedId(id);
     setPublishedVersionId("");
@@ -311,6 +309,23 @@ function HydratedOntologyEditor({ ontologyId, ontologyName, ontologySlug = ontol
     setNodes((items) => items.filter((node) => node.id !== selected.id));
     setEdges((items) => items.filter((edge) => edge.source !== selected.id && edge.target !== selected.id));
     setSelectedId(""); setPublishedVersionId("");
+  }
+
+  function duplicateSelectedFunction() {
+    if (!selected || selected.data.kind !== "function") return;
+    const existingNames = new Set(nodes.map((node) => node.data.apiName));
+    let apiName = `${selected.data.apiName}_copy`;
+    for (let suffix = 2; existingNames.has(apiName); suffix += 1) apiName = `${selected.data.apiName}_copy_${suffix}`;
+    const id = `function-${crypto.randomUUID()}`;
+    const copy: OntologyNode = {
+      ...selected,
+      id,
+      position: { x: selected.position.x + 45, y: selected.position.y + 45 },
+      data: { ...selected.data, apiName, displayName: `${selected.data.displayName} copy`, properties: selected.data.properties.map((property) => ({ ...property })) },
+      selected: false,
+    };
+    setNodes((items) => [...items, copy]);
+    setSelectedId(id); setSelectedEdgeId(null); setPublishedVersionId("");
   }
 
   function updateLink(patch: Partial<LinkData>) {
@@ -354,25 +369,30 @@ function HydratedOntologyEditor({ ontologyId, ontologyName, ontologySlug = ontol
     }
   }
 
-  async function runFunction() {
-    if (!selected || selected.data.kind !== "function" || !publishedVersionId) return;
-    setFunctionBusy(true); setFunctionResult("");
-    try {
-      JSON.parse(functionArguments);
-      const result = await executeOntologyFunction(publishedVersionId, selected.data.apiName, functionArguments);
-      setFunctionResult(`${result.resultJson}\n\n${result.executor} · ${result.durationMillis} ms`);
-    } catch (error) {
-      setFunctionResult(error instanceof Error ? error.message : "Function execution failed.");
-    } finally { setFunctionBusy(false); }
-  }
-
   return <div className="workspace-view"><header className="stage-header"><div><span className="eyebrow">Ontology editor · isolated model</span><input className="ontology-name-input" aria-label="Ontology name" value={ontologyName} onChange={(event) => onRename(event.target.value)}/><p>Object types, links, interfaces, reusable types and read-only functions.</p></div><div className="header-actions"><span className="save-state"><Save size={13}/> {saveState}</span><button className="button secondary icon-button" aria-label="Undo ontology change" disabled={historyIndex === 0} onClick={() => moveHistory(-1)}><Undo2 size={15}/></button><button className="button secondary icon-button" aria-label="Redo ontology change" disabled={historyIndex >= history.length - 1} onClick={() => moveHistory(1)}><Redo2 size={15}/></button><button className="button secondary" onClick={validateDraft}><Check size={15}/> Validate</button><button className="button primary" onClick={() => void publishDraft()}><Send size={15}/> Publish</button></div></header>
     {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
     <div className="editor-layout"><div className="canvas-panel"><div className="canvas-toolbar">{(["object", "interface", "value_type", "struct", "shared_property", "function"] as NodeKind[]).map((kind) => <button key={kind} onClick={() => addNode(kind)}><Plus size={14}/> {kindMeta[kind].label}</button>)}</div>
       <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={connect} onNodeClick={(_, node) => { setSelectedId(node.id); setSelectedEdgeId(null); }} onEdgeClick={(_, edge) => { setSelectedId(""); setSelectedEdgeId(edge.id); }} fitView><Background variant={BackgroundVariant.Dots} gap={18} size={1}/><MiniMap pannable zoomable/><Controls/></ReactFlow></div>
       <aside className="inspector"><span className="eyebrow">Inspector</span>{selected ? <><h2>{kindMeta[selected.data.kind].label}</h2><label>Display name<input value={selected.data.displayName} onChange={(event) => updateSelected("displayName", event.target.value)}/></label><label>API name<input value={selected.data.apiName} onChange={(event) => updateSelected("apiName", event.target.value)}/><small>Stable after first publish</small></label><label>Description<textarea value={selected.data.description} onChange={(event) => updateSelected("description", event.target.value)}/></label>{selected.data.kind === "function" && <><label>Output type<select value={selected.data.functionOutput} onChange={(event) => updateSelected("functionOutput", event.target.value)}>{["String", "Boolean", "Int64", "Float64", "Decimal", "Date", "Timestamp", "UUID", "JSON", "List", "ValueType", "Struct"].map((type) => <option key={type}>{type}</option>)}</select></label>{(selected.data.functionOutput === "ValueType" || selected.data.functionOutput === "Struct") && <label>Output API name<input value={selected.data.functionOutputReference ?? ""} onChange={(event) => updateSelected("functionOutputReference", event.target.value)}/></label>}<label>Implementation<select value={selected.data.implementation} onChange={(event) => updateSelected("implementation", event.target.value)}><option value="expression">Expression</option><option value="external_grpc">External gRPC</option><option value="wasm">WASM</option></select><small>Functions are read-only in V1.</small></label>{selected.data.implementation === "expression" && <label>Controlled expression<textarea aria-label="Controlled expression" value={selected.data.functionExpression ?? ""} onChange={(event) => updateSelected("functionExpression", event.target.value)}/><small>Arguments, arithmetic, comparisons, concat, coalesce, lower, upper, trim and length.</small></label>}{selected.data.implementation === "external_grpc" && <><label>gRPC endpoint<input value={selected.data.endpoint ?? ""} onChange={(event) => updateSelected("endpoint", event.target.value)}/></label><label>Method<input value={selected.data.method ?? "invoke"} onChange={(event) => updateSelected("method", event.target.value)}/><small>Uses the typed ContextHub ExternalFunctionService contract.</small></label></>}{selected.data.implementation === "wasm" && <><label>Artifact URI<input value={selected.data.artifactUri ?? ""} onChange={(event) => updateSelected("artifactUri", event.target.value)}/><small>object:// or s3://context-hub/</small></label><label>Entrypoint<input value={selected.data.entrypoint ?? "run"} onChange={(event) => updateSelected("entrypoint", event.target.value)}/></label></>}</>}
         <div className="inspector-section"><div className="section-title"><span>{selected.data.kind === "function" ? "Inputs" : selected.data.kind === "struct" ? "Fields" : "Properties"}</span><button onClick={addProperty}><Plus size={13}/> Add</button></div>{selected.data.properties.map((property, index) => <div className="property-edit" key={`${property.name}-${index}`}><input value={property.name} onChange={(event) => updateProperty(index, { name: event.target.value })}/><select value={property.type} onChange={(event) => updateProperty(index, { type: event.target.value, reference: undefined })}>{["String", "Boolean", "Int64", "Float64", "Decimal", "Date", "Timestamp", "UUID", "Enum", "JSON", "List", "ValueType", "Struct"].map((type) => <option key={type}>{type}</option>)}</select><button className="property-delete" aria-label={`Delete ${property.name}`} onClick={() => deleteProperty(index)}><X size={12}/></button>{(property.type === "ValueType" || property.type === "Struct") && <input className="property-reference" placeholder={`${property.type} API name`} value={property.reference ?? ""} onChange={(event) => updateProperty(index, { reference: event.target.value })}/>}<input className="property-description" placeholder="Property description" value={property.description ?? ""} onChange={(event) => updateProperty(index, { description: event.target.value })}/><PropertyFlags kind={selected.data.kind} property={property} onChange={(propertyPatch) => updateProperty(index, propertyPatch)}/>{property.derived && <input placeholder="Controlled expression" value={property.expression ?? ""} onChange={(event) => updateProperty(index, { expression: event.target.value })}/>}</div>)}</div>
-        {selected.data.kind === "function" && <div className="inspector-section function-runner"><div className="section-title"><span>Test function</span></div><label>Arguments JSON<textarea aria-label="Function arguments JSON" value={functionArguments} onChange={(event) => setFunctionArguments(event.target.value)}/></label><button className="button primary" disabled={!publishedVersionId || functionBusy} onClick={() => void runFunction()}>{functionBusy ? "Running…" : "Run published version"}</button>{!publishedVersionId && <small>Publish the current ontology before running this function.</small>}{functionResult && <pre aria-label="Function result">{functionResult}</pre>}</div>}
+        {selected.data.kind === "function" && (
+          <FunctionTools
+            key={`${selected.id}:${publishedVersionId}`}
+            publishedVersionId={publishedVersionId}
+            functionApiName={selected.data.apiName}
+            implementation={
+              (selected.data.implementation ?? "expression") as
+                | "expression"
+                | "external_grpc"
+                | "wasm"
+            }
+            endpoint={selected.data.endpoint ?? ""}
+            method={selected.data.method ?? "invoke"}
+            artifactUri={selected.data.artifactUri ?? ""}
+            onArtifactSelect={(uri) => updateSelected("artifactUri", uri)}
+          />
+        )}
+        {selected.data.kind === "function" && <button className="button secondary full duplicate-function" onClick={duplicateSelectedFunction}><Copy size={14}/> Duplicate function</button>}
         <button className="button danger full" onClick={deleteSelectedNode}><Trash2 size={14}/> Delete {kindMeta[selected.data.kind].label.toLowerCase()}</button>
       </> : selectedEdge?.data ? <>
         <h2><Link2 size={15}/> Link type</h2>

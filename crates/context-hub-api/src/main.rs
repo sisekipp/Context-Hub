@@ -10,20 +10,24 @@ use chrono::{DateTime, NaiveDate, Utc};
 use context_hub_api::context_hub::v1::GraphFilter as ApiGraphFilter;
 use context_hub_api::context_hub::v1::{
     CreateOntologyRequest, DataSource, DataSourceUsage, DeleteDataSourceRequest,
-    ExecuteFunctionRequest, ExecuteFunctionResponse, ExpandGraphRequest, GetDataSourceUsageRequest,
-    GetDataSourceUsageResponse, GetIngestionJobRequest, GetObjectProvenanceRequest,
-    GetObjectProvenanceResponse, GetObjectRequest, GetOntologyDraftRequest,
-    GetUploadDataSourceRequest, GetUploadDataSourceResponse, GetWorkspaceRequest,
-    GraphAggregationResult, GraphEdge, GraphNode, GraphQuery, ImportGraphRequest, IngestionEvent,
-    IngestionJob, IngestionState, ListDataSourcesRequest, ListDataSourcesResponse,
-    ListIngestionEventsRequest, ListIngestionEventsResponse, ListIngestionJobsRequest,
-    ListIngestionJobsResponse, ListOntologiesRequest, ListOntologiesResponse,
-    ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse, ListOntologyVersionsRequest,
-    ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology, OntologyDataMapping,
-    OntologyDraft, OntologyVersion, PreviewDataSourceRequest, PreviewDataSourceResponse,
-    PropertyProvenance, PublishOntologyRequest, QueryGraphResponse, RetryIngestionJobRequest,
-    SaveDataSourceRequest, SaveOntologyDataMappingRequest, SaveOntologyDraftRequest,
-    StartIngestionRequest, UploadDataSourceRequest, UploadDataSourceResponse,
+    DeleteFunctionArtifactRequest, ExecuteFunctionRequest, ExecuteFunctionResponse,
+    ExpandGraphRequest, FunctionArtifact, FunctionExecution, FunctionExecutionState,
+    GetDataSourceUsageRequest, GetDataSourceUsageResponse, GetIngestionJobRequest,
+    GetObjectProvenanceRequest, GetObjectProvenanceResponse, GetObjectRequest,
+    GetOntologyDraftRequest, GetUploadDataSourceRequest, GetUploadDataSourceResponse,
+    GetWorkspaceRequest, GraphAggregationResult, GraphEdge, GraphNode, GraphQuery,
+    ImportGraphRequest, IngestionEvent, IngestionJob, IngestionState, ListDataSourcesRequest,
+    ListDataSourcesResponse, ListFunctionArtifactsRequest, ListFunctionArtifactsResponse,
+    ListFunctionExecutionsRequest, ListFunctionExecutionsResponse, ListIngestionEventsRequest,
+    ListIngestionEventsResponse, ListIngestionJobsRequest, ListIngestionJobsResponse,
+    ListOntologiesRequest, ListOntologiesResponse, ListOntologyDataMappingsRequest,
+    ListOntologyDataMappingsResponse, ListOntologyVersionsRequest, ListOntologyVersionsResponse,
+    ListWorkspacesResponse, Ontology, OntologyDataMapping, OntologyDraft, OntologyVersion,
+    PreviewDataSourceRequest, PreviewDataSourceResponse, PropertyProvenance,
+    PublishOntologyRequest, QueryGraphResponse, RetryIngestionJobRequest, SaveDataSourceRequest,
+    SaveOntologyDataMappingRequest, SaveOntologyDraftRequest, StartIngestionRequest,
+    TestExternalFunctionProviderRequest, TestExternalFunctionProviderResponse,
+    UploadDataSourceRequest, UploadDataSourceResponse, UploadFunctionArtifactRequest,
     ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue, Workspace,
     data_source_service_server::{DataSourceService, DataSourceServiceServer},
     function_service_server::{FunctionService, FunctionServiceServer},
@@ -40,7 +44,8 @@ use context_hub_domain::{
     LinkTypeDefinition, TypeReference,
 };
 use context_hub_domain::{
-    ObjectTypeDefinition, OntologyDefinition, PropertyDefinition, ScalarType, ValueType,
+    ObjectTypeDefinition, OntologyDefinition, PropertyDefinition, ScalarType,
+    ValidationIssue as DomainValidationIssue, ValueType,
 };
 use context_hub_mapping::{
     MappingDocument, MappingPlan, SourceFormat, execute_source_mapping_bundle,
@@ -53,8 +58,9 @@ use context_hub_storage::{
     GraphRepository, GraphSort as StorageGraphSort, ObjectStoreSourceRepository, PropertyIndexKind,
     PropertyIndexValue, PropertyIndexWrite, SortDirection as StorageSortDirection,
     SortKind as StorageSortKind, SourceObjectStore, StorageError, StoredDataSource,
-    StoredIngestionEvent, StoredIngestionJob, StoredOntology, StoredOntologyDraft,
-    StoredOntologyMapping, StoredOntologyVersion, TraversalStep as StorageTraversalStep,
+    StoredFunctionArtifact, StoredFunctionExecution, StoredIngestionEvent, StoredIngestionJob,
+    StoredOntology, StoredOntologyDraft, StoredOntologyMapping, StoredOntologyVersion,
+    TraversalStep as StorageTraversalStep,
 };
 #[cfg(test)]
 use context_hub_storage::{MemoryGraphRepository, MemorySourceObjectStore};
@@ -83,6 +89,8 @@ struct Runtime {
     mappings: Arc<RwLock<HashMap<String, OntologyDataMapping>>>,
     jobs: Arc<RwLock<HashMap<String, IngestionJob>>>,
     events: Arc<RwLock<HashMap<String, Vec<IngestionEvent>>>>,
+    function_artifacts: Arc<RwLock<HashMap<String, FunctionArtifact>>>,
+    function_executions: Arc<RwLock<Vec<FunctionExecution>>>,
     graph: Arc<dyn GraphRepository>,
     source_store: Arc<dyn SourceObjectStore>,
     control_plane: Option<Arc<dyn ControlPlaneRepository>>,
@@ -98,6 +106,7 @@ struct UploadSourceConfiguration {
 }
 
 const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
+const MAX_WASM_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REST_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REST_PREVIEW_RECORDS: usize = 10_000;
 
@@ -139,6 +148,8 @@ impl Runtime {
             mappings: Arc::default(),
             jobs: Arc::default(),
             events: Arc::default(),
+            function_artifacts: Arc::default(),
+            function_executions: Arc::default(),
             graph,
             source_store,
             control_plane,
@@ -391,6 +402,59 @@ impl Runtime {
             events.entry(value.job_id.clone()).or_default().push(value);
         }
         Ok(())
+    }
+
+    async fn append_function_execution(&self, value: FunctionExecution) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .append_function_execution(
+                    &stored_function_execution(&value).map_err(storage_status)?,
+                )
+                .await
+                .map_err(storage_status)?;
+        }
+        self.function_executions.write().await.push(value);
+        Ok(())
+    }
+
+    async fn function_artifact_values(&self) -> Result<Vec<FunctionArtifact>, Status> {
+        if let Some(repository) = &self.control_plane {
+            return repository
+                .list_function_artifacts(parse_uuid(&dev_workspace_id(), "workspace_id")?)
+                .await
+                .map_err(storage_status)?
+                .into_iter()
+                .map(proto_function_artifact)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_status);
+        }
+        Ok(self
+            .function_artifacts
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    async fn artifact_is_referenced(&self, artifact_uri: &str) -> bool {
+        let drafts = self.drafts.read().await;
+        if drafts.values().any(|draft| {
+            serde_json::from_str::<OntologyDefinition>(&draft.definition_json)
+                .is_ok_and(|definition| definition_references_artifact(&definition, artifact_uri))
+        }) {
+            return true;
+        }
+        self.versions
+            .read()
+            .await
+            .values()
+            .flatten()
+            .any(|version| {
+                serde_json::from_str::<OntologyDefinition>(&version.definition_json).is_ok_and(
+                    |definition| definition_references_artifact(&definition, artifact_uri),
+                )
+            })
     }
 
     async fn execute_direct_graph_import(
@@ -854,20 +918,241 @@ impl FunctionService for Runtime {
         let arguments = serde_json::from_str(&request.arguments_json).map_err(|error| {
             Status::invalid_argument(format!("arguments_json is invalid: {error}"))
         })?;
+        let executor = function_executor(function);
         let started = std::time::Instant::now();
-        let (result, executor) = function_runtime::execute(
+        let outcome = function_runtime::execute(
             &definition,
             function,
             arguments,
             Arc::clone(&self.source_store),
         )
-        .await
-        .map_err(Status::invalid_argument)?;
+        .await;
+        let duration_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let execution_id = Uuid::new_v4().to_string();
+        let execution = FunctionExecution {
+            id: execution_id.clone(),
+            workspace_id: request.workspace_id.clone(),
+            ontology_version_id: request.ontology_version_id.clone(),
+            function_api_name: request.function_api_name.clone(),
+            executor: executor.into(),
+            state: if outcome.is_ok() {
+                FunctionExecutionState::Succeeded as i32
+            } else {
+                FunctionExecutionState::Failed as i32
+            },
+            arguments_json: request.arguments_json,
+            result_json: outcome
+                .as_ref()
+                .map(|result| result.0.to_string())
+                .unwrap_or_default(),
+            error: outcome.as_ref().err().cloned().unwrap_or_default(),
+            duration_millis,
+            executed_at: Some(timestamp(Utc::now())),
+        };
+        self.append_function_execution(execution).await?;
+        let (result, _) = outcome.map_err(Status::invalid_argument)?;
         Ok(Response::new(ExecuteFunctionResponse {
             result_json: result.to_string(),
             executor: executor.into(),
+            duration_millis,
+            execution_id,
+        }))
+    }
+
+    async fn upload_artifact(
+        &self,
+        request: Request<UploadFunctionArtifactRequest>,
+    ) -> Result<Response<FunctionArtifact>, Status> {
+        let request = request.into_inner();
+        if request.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if request.name.trim().is_empty() || request.file_name.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "artifact name and file name are required",
+            ));
+        }
+        if request.content.is_empty() || request.content.len() > MAX_WASM_ARTIFACT_BYTES {
+            return Err(Status::resource_exhausted(
+                "WASM artifacts must contain between 1 byte and 16 MiB",
+            ));
+        }
+        function_runtime::validate_wasm_artifact(&request.content)
+            .map_err(Status::invalid_argument)?;
+        let id = Uuid::new_v4();
+        let object_key = format!("functions/{}/{id}.wasm", request.workspace_id);
+        let sha256 = Sha256::digest(&request.content).iter().fold(
+            String::with_capacity(64),
+            |mut output, byte| {
+                write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+                output
+            },
+        );
+        self.source_store
+            .put(&object_key, request.content.clone())
+            .await
+            .map_err(storage_status)?;
+        let artifact = FunctionArtifact {
+            id: id.to_string(),
+            workspace_id: request.workspace_id,
+            name: request.name,
+            file_name: request.file_name,
+            artifact_uri: format!("object://{object_key}"),
+            size_bytes: request.content.len() as u64,
+            sha256,
+            created_at: Some(timestamp(Utc::now())),
+        };
+        if let Some(repository) = &self.control_plane
+            && let Err(error) = repository
+                .save_function_artifact(
+                    &stored_function_artifact(&artifact, persistence_revision())
+                        .map_err(storage_status)?,
+                )
+                .await
+        {
+            let _ = self.source_store.delete(&object_key).await;
+            return Err(storage_status(error));
+        }
+        self.function_artifacts
+            .write()
+            .await
+            .insert(artifact.id.clone(), artifact.clone());
+        Ok(Response::new(artifact))
+    }
+
+    async fn list_artifacts(
+        &self,
+        request: Request<ListFunctionArtifactsRequest>,
+    ) -> Result<Response<ListFunctionArtifactsResponse>, Status> {
+        if request.into_inner().workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        let mut artifacts = self.function_artifact_values().await?;
+        artifacts.sort_by(|left, right| {
+            timestamp_sort_key(right.created_at.as_ref())
+                .cmp(&timestamp_sort_key(left.created_at.as_ref()))
+        });
+        Ok(Response::new(ListFunctionArtifactsResponse { artifacts }))
+    }
+
+    async fn delete_artifact(
+        &self,
+        request: Request<DeleteFunctionArtifactRequest>,
+    ) -> Result<Response<()>, Status> {
+        let request = request.into_inner();
+        if request.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        let id = request.id;
+        let artifact = self
+            .function_artifact_values()
+            .await?
+            .into_iter()
+            .find(|artifact| artifact.id == id)
+            .ok_or_else(|| Status::not_found("function artifact not found"))?;
+        if self.artifact_is_referenced(&artifact.artifact_uri).await {
+            return Err(Status::failed_precondition(
+                "function artifact is referenced by an ontology draft or version",
+            ));
+        }
+        let object_key = artifact
+            .artifact_uri
+            .strip_prefix("object://")
+            .ok_or_else(|| Status::internal("stored artifact URI is invalid"))?;
+        if let Some(repository) = &self.control_plane {
+            repository
+                .delete_function_artifact(
+                    &stored_function_artifact(&artifact, persistence_revision())
+                        .map_err(storage_status)?,
+                )
+                .await
+                .map_err(storage_status)?;
+        }
+        self.source_store
+            .delete(object_key)
+            .await
+            .map_err(storage_status)?;
+        self.function_artifacts.write().await.remove(&id);
+        Ok(Response::new(()))
+    }
+
+    async fn test_external_provider(
+        &self,
+        request: Request<TestExternalFunctionProviderRequest>,
+    ) -> Result<Response<TestExternalFunctionProviderResponse>, Status> {
+        let request = request.into_inner();
+        if request.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if request.arguments_json.len() > 1024 * 1024 {
+            return Err(Status::invalid_argument("function arguments exceed 1 MiB"));
+        }
+        let arguments = serde_json::from_str(&request.arguments_json).map_err(|error| {
+            Status::invalid_argument(format!("arguments_json is invalid: {error}"))
+        })?;
+        let started = std::time::Instant::now();
+        let result = function_runtime::test_external_provider(
+            &request.endpoint,
+            &request.method,
+            &request.function_api_name,
+            arguments,
+        )
+        .await
+        .map_err(Status::invalid_argument)?;
+        Ok(Response::new(TestExternalFunctionProviderResponse {
+            result_json: result.to_string(),
             duration_millis: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         }))
+    }
+
+    async fn list_executions(
+        &self,
+        request: Request<ListFunctionExecutionsRequest>,
+    ) -> Result<Response<ListFunctionExecutionsResponse>, Status> {
+        let request = request.into_inner();
+        if request.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        let limit = request.limit.clamp(1, 200);
+        let executions = if let Some(repository) = &self.control_plane {
+            repository
+                .list_function_executions(
+                    parse_uuid(&request.workspace_id, "workspace_id")?,
+                    (!request.ontology_version_id.is_empty())
+                        .then(|| parse_uuid(&request.ontology_version_id, "ontology_version_id"))
+                        .transpose()?,
+                    (!request.function_api_name.is_empty())
+                        .then_some(request.function_api_name.as_str()),
+                    limit,
+                )
+                .await
+                .map_err(storage_status)?
+                .into_iter()
+                .map(proto_function_execution)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_status)?
+        } else {
+            let mut values = self
+                .function_executions
+                .read()
+                .await
+                .iter()
+                .filter(|execution| {
+                    (request.ontology_version_id.is_empty()
+                        || execution.ontology_version_id == request.ontology_version_id)
+                        && (request.function_api_name.is_empty()
+                            || execution.function_api_name == request.function_api_name)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            values.sort_by(|left, right| {
+                timestamp_sort_key(right.executed_at.as_ref())
+                    .cmp(&timestamp_sort_key(left.executed_at.as_ref()))
+            });
+            values.truncate(limit as usize);
+            values
+        };
+        Ok(Response::new(ListFunctionExecutionsResponse { executions }))
     }
 }
 
@@ -1004,6 +1289,7 @@ impl OntologyService for Runtime {
         let issues = definition
             .validate()
             .into_iter()
+            .chain(function_implementation_issues(&definition))
             .map(|issue| ValidationIssue {
                 path: issue.path,
                 code: issue.code,
@@ -1036,7 +1322,11 @@ impl OntologyService for Runtime {
         }
         let definition: OntologyDefinition = serde_json::from_str(&draft.definition_json)
             .map_err(|error| Status::internal(error.to_string()))?;
-        let issues = definition.validate();
+        let issues = definition
+            .validate()
+            .into_iter()
+            .chain(function_implementation_issues(&definition))
+            .collect::<Vec<_>>();
         if !issues.is_empty() {
             return Err(Status::failed_precondition(
                 serde_json::to_string(&issues).unwrap_or_default(),
@@ -2918,6 +3208,123 @@ fn timestamp_sort_key(value: Option<&Timestamp>) -> (i64, i32) {
     value.map_or((0, 0), |value| (value.seconds, value.nanos))
 }
 
+fn function_executor(function: &context_hub_domain::FunctionDefinition) -> &'static str {
+    match function.implementation {
+        context_hub_domain::FunctionImplementation::Expression { .. } => "expression",
+        context_hub_domain::FunctionImplementation::ExternalGrpc { .. } => "external_grpc",
+        context_hub_domain::FunctionImplementation::Wasm { .. } => "wasm",
+    }
+}
+
+fn definition_references_artifact(definition: &OntologyDefinition, artifact_uri: &str) -> bool {
+    definition.functions.iter().any(|function| {
+        matches!(
+            &function.implementation,
+            context_hub_domain::FunctionImplementation::Wasm { artifact_uri: value, .. }
+                if value == artifact_uri
+        )
+    })
+}
+
+fn function_implementation_issues(definition: &OntologyDefinition) -> Vec<DomainValidationIssue> {
+    definition
+        .functions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, function)| {
+            let context_hub_domain::FunctionImplementation::Expression { expression } =
+                &function.implementation
+            else {
+                return None;
+            };
+            let arguments = function
+                .inputs
+                .iter()
+                .map(|input| input.api_name.as_str())
+                .collect::<Vec<_>>();
+            function_runtime::validate_expression(expression, &arguments)
+                .err()
+                .map(|message| DomainValidationIssue {
+                    path: format!("functions[{index}].implementation.expression"),
+                    code: "invalid_expression".into(),
+                    message,
+                })
+        })
+        .collect()
+}
+
+fn stored_function_artifact(
+    value: &FunctionArtifact,
+    revision: u64,
+) -> Result<StoredFunctionArtifact, StorageError> {
+    Ok(StoredFunctionArtifact {
+        id: parse_uuid_storage(&value.id)?,
+        workspace_id: parse_uuid_storage(&value.workspace_id)?,
+        name: value.name.clone(),
+        file_name: value.file_name.clone(),
+        object_key: value
+            .artifact_uri
+            .strip_prefix("object://")
+            .ok_or_else(|| StorageError::InvalidRecord("artifact URI is invalid".into()))?
+            .to_owned(),
+        size_bytes: value.size_bytes,
+        sha256: value.sha256.clone(),
+        revision,
+        created_at_micros: timestamp_micros(value.created_at.as_ref())?,
+    })
+}
+
+fn proto_function_artifact(
+    value: StoredFunctionArtifact,
+) -> Result<FunctionArtifact, StorageError> {
+    Ok(FunctionArtifact {
+        id: value.id.to_string(),
+        workspace_id: value.workspace_id.to_string(),
+        name: value.name,
+        file_name: value.file_name,
+        artifact_uri: format!("object://{}", value.object_key),
+        size_bytes: value.size_bytes,
+        sha256: value.sha256,
+        created_at: Some(proto_timestamp(value.created_at_micros)?),
+    })
+}
+
+fn stored_function_execution(
+    value: &FunctionExecution,
+) -> Result<StoredFunctionExecution, StorageError> {
+    Ok(StoredFunctionExecution {
+        id: parse_uuid_storage(&value.id)?,
+        workspace_id: parse_uuid_storage(&value.workspace_id)?,
+        ontology_version_id: parse_uuid_storage(&value.ontology_version_id)?,
+        function_api_name: value.function_api_name.clone(),
+        executor: value.executor.clone(),
+        state: value.state,
+        arguments_json: value.arguments_json.clone(),
+        result_json: value.result_json.clone(),
+        error: value.error.clone(),
+        duration_millis: value.duration_millis,
+        executed_at_micros: timestamp_micros(value.executed_at.as_ref())?,
+    })
+}
+
+fn proto_function_execution(
+    value: StoredFunctionExecution,
+) -> Result<FunctionExecution, StorageError> {
+    Ok(FunctionExecution {
+        id: value.id.to_string(),
+        workspace_id: value.workspace_id.to_string(),
+        ontology_version_id: value.ontology_version_id.to_string(),
+        function_api_name: value.function_api_name,
+        executor: value.executor,
+        state: value.state,
+        arguments_json: value.arguments_json,
+        result_json: value.result_json,
+        error: value.error,
+        duration_millis: value.duration_millis,
+        executed_at: Some(proto_timestamp(value.executed_at_micros)?),
+    })
+}
+
 fn persistence_revision() -> u64 {
     u64::try_from(Utc::now().timestamp_micros()).unwrap_or_default()
 }
@@ -3287,8 +3694,7 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     }
 
-    #[tokio::test]
-    async fn executes_a_published_typed_expression_function() {
+    async fn published_expression_runtime() -> (Runtime, String) {
         let runtime = Runtime::seeded().await;
         let ontology_id = runtime
             .ontologies
@@ -3342,11 +3748,17 @@ mod tests {
         .await
         .unwrap()
         .into_inner();
+        (runtime, version.id)
+    }
+
+    #[tokio::test]
+    async fn executes_a_published_typed_expression_function() {
+        let (runtime, version_id) = published_expression_runtime().await;
         let response = FunctionService::execute(
             &runtime,
             Request::new(ExecuteFunctionRequest {
                 workspace_id: dev_workspace_id(),
-                ontology_version_id: version.id,
+                ontology_version_id: version_id.clone(),
                 function_api_name: "greeting".into(),
                 arguments_json: r#"{"name":" ContextHub "}"#.into(),
             }),
@@ -3356,6 +3768,162 @@ mod tests {
         .into_inner();
         assert_eq!(response.result_json, r#""Hello ContextHub""#);
         assert_eq!(response.executor, "expression");
+        assert!(!response.execution_id.is_empty());
+        let history = FunctionService::list_executions(
+            &runtime,
+            Request::new(ListFunctionExecutionsRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version_id,
+                function_api_name: "greeting".into(),
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("function history can be listed")
+        .into_inner();
+        assert_eq!(history.executions.len(), 1);
+        assert_eq!(history.executions[0].id, response.execution_id);
+        assert_eq!(
+            history.executions[0].state,
+            FunctionExecutionState::Succeeded as i32
+        );
+    }
+
+    #[tokio::test]
+    async fn records_failed_function_executions() {
+        let (runtime, version_id) = published_expression_runtime().await;
+        let error = FunctionService::execute(
+            &runtime,
+            Request::new(ExecuteFunctionRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version_id.clone(),
+                function_api_name: "greeting".into(),
+                arguments_json: "{}".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        let history = FunctionService::list_executions(
+            &runtime,
+            Request::new(ListFunctionExecutionsRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version_id,
+                function_api_name: "greeting".into(),
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(history.executions.len(), 1);
+        assert_eq!(
+            history.executions[0].state,
+            FunctionExecutionState::Failed as i32
+        );
+        assert!(history.executions[0].error.contains("required"));
+    }
+
+    #[tokio::test]
+    async fn refuses_to_publish_invalid_controlled_expressions() {
+        let runtime = Runtime::seeded().await;
+        let ontology_id = runtime.drafts.read().await.keys().next().unwrap().clone();
+        let expected_revision = {
+            let mut drafts = runtime.drafts.write().await;
+            let draft = drafts.get_mut(&ontology_id).unwrap();
+            let mut definition: OntologyDefinition =
+                serde_json::from_str(&draft.definition_json).unwrap();
+            definition.functions.push(FunctionDefinition {
+                api_name: "broken".into(),
+                display_name: "Broken".into(),
+                description: None,
+                inputs: vec![FunctionParameterDefinition {
+                    api_name: "name".into(),
+                    display_name: "Name".into(),
+                    value_type: TypeReference::Scalar {
+                        value_type: ValueType {
+                            scalar: ScalarType::String,
+                            list: false,
+                        },
+                    },
+                    required: true,
+                }],
+                output: TypeReference::Scalar {
+                    value_type: ValueType {
+                        scalar: ScalarType::String,
+                        list: false,
+                    },
+                },
+                implementation: FunctionImplementation::Expression {
+                    expression: "concat(unknown".into(),
+                },
+                read_only: true,
+            });
+            draft.definition_json = serde_json::to_string(&definition).unwrap();
+            draft.revision
+        };
+        let error = OntologyService::publish(
+            &runtime,
+            Request::new(PublishOntologyRequest {
+                ontology_id,
+                expected_revision,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("invalid_expression"));
+    }
+
+    #[tokio::test]
+    async fn uploads_lists_and_deletes_wasm_artifacts() {
+        let runtime = Runtime::seeded().await;
+        let content = wat::parse_str("(module)").unwrap();
+        let artifact = FunctionService::upload_artifact(
+            &runtime,
+            Request::new(UploadFunctionArtifactRequest {
+                workspace_id: dev_workspace_id(),
+                name: "Normalizer".into(),
+                file_name: "normalizer.wasm".into(),
+                content,
+            }),
+        )
+        .await
+        .expect("valid WASM artifact can be uploaded")
+        .into_inner();
+        assert!(artifact.artifact_uri.starts_with("object://functions/"));
+        let listed = FunctionService::list_artifacts(
+            &runtime,
+            Request::new(ListFunctionArtifactsRequest {
+                workspace_id: dev_workspace_id(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(listed.artifacts.len(), 1);
+        FunctionService::delete_artifact(
+            &runtime,
+            Request::new(DeleteFunctionArtifactRequest {
+                workspace_id: dev_workspace_id(),
+                id: artifact.id,
+            }),
+        )
+        .await
+        .expect("unused artifact can be deleted");
+        assert!(
+            FunctionService::list_artifacts(
+                &runtime,
+                Request::new(ListFunctionArtifactsRequest {
+                    workspace_id: dev_workspace_id()
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .artifacts
+            .is_empty()
+        );
     }
 
     #[tokio::test]
