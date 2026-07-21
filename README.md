@@ -228,7 +228,6 @@ entire workflow:
 
 - Dataset: [`demo/data/nova-commerce.json`](demo/data/nova-commerce.json)
 - Demo guide: [`demo/README.md`](demo/README.md)
-- Tour script: [`demo/TOUR.md`](demo/TOUR.md)
 - Final narrated tour: [`context-hub-demo-tour-en-final.mp4`](demo/assets/context-hub-demo-tour-en-final.mp4)
 - All screenshots: [`demo/assets/screenshots/`](demo/assets/screenshots/)
 
@@ -237,6 +236,24 @@ Regenerate the deterministic dataset with:
 ```bash
 node scripts/generate-demo-data.mjs
 ```
+
+## Built with Codex and GPT-5.6
+
+ContextHub is a solo project. I used Codex, powered by GPT-5.6, as an AI development partner
+throughout the build while retaining responsibility for the product direction, architecture,
+technical decisions, and final review.
+
+Codex helped me turn the initial product idea into an implementation plan, scaffold and evolve
+the Rust and Next.js monorepo, implement individual features, write tests, investigate runtime
+problems, and improve the documentation and demo. It was particularly useful when working across
+the Protobuf, gRPC, Arrow/DataFusion, ClickHouse, React Flow, and graph-visualization boundaries,
+where a change often affected several layers at once.
+
+I also used Codex to reproduce and diagnose concrete issues rather than only generate code. This
+included Devcontainer toolchain problems, Docker disk usage, ingestion and ontology-mapping bugs,
+2D/3D interaction issues, and the final MCP-to-GraphService integration. Every change was checked
+against the running application, automated tests, or both. GPT-5.6 and Codex accelerated the
+iteration loop; the repository, its design choices, and the submitted result remain my work.
 
 ## Quick start
 
