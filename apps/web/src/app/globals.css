@@ -131,11 +131,27 @@ button { color: inherit; }
 .mapping-row.ontology-bound select { min-width: 0; height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; color: #c6d1e2; background: #151e2d; font-size: 10px; }
 .mapping-row.ontology-bound button, .link-mapping-title button { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
 .mapping-row.ontology-bound button:hover, .link-mapping-title button:hover { color: #ffadc3; background: #311720; }
+.mapping-row.ontology-bound button:disabled { opacity: .3; cursor: not-allowed; }
 .mapping-row code { color: #ccd6e5; font-size: 10px; }
 .mapping-row > svg { color: #63728a; }
 .mapping-row select, .transform-button { height: 28px; border: 1px solid var(--line); border-radius: 6px; color: #c6d1e2; background: #151e2d; font-size: 10px; }
 .mapping-row input { min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; color: #c6d1e2; background: #151e2d; font-size: 10px; }
 .transform-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+.transform-count { color: #9fb0c9; font-size: 9px; }
+.transform-editor { grid-column: 1 / -1; margin-top: 2px; padding-top: 8px; border-top: 1px solid #202b3d; }
+.transform-editor-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.transform-editor-title > span { display: inline-flex; align-items: center; gap: 5px; color: #91a5c3; font-size: 9px; font-weight: 650; }
+.transform-editor-title > span svg { color: #c792ea; }
+.transform-editor-title > select { width: 130px; }
+.transform-empty { display: block; padding: 6px 0 1px; color: #65738a; font-size: 9px; }
+.transform-step { display: grid; grid-template-columns: 20px 120px minmax(0, 1fr) 78px; align-items: end; gap: 7px; margin-top: 7px; }
+.transform-order { display: grid; place-items: center; height: 28px; border-radius: 999px; color: #b9c7dd; background: #202b3d; font-size: 9px; }
+.transform-parameters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; min-width: 0; }
+.transform-parameters label { display: flex; flex-direction: column; gap: 3px; min-width: 0; color: #7788a2; font-size: 8px; }
+.transform-parameters input, .transform-parameters select { width: 100%; }
+.transform-no-parameters { align-self: center; padding-bottom: 7px; color: #65738a; font-size: 8px; }
+.transform-step-actions { display: flex; align-items: center; justify-content: flex-end; gap: 1px; }
+.mapping-row.ontology-bound .transform-step-actions button { width: 24px; height: 28px; }
 .identity-callout { display: flex; align-items: center; gap: 9px; margin-top: 18px; padding: 11px; border: 1px solid #31564d; border-radius: 8px; color: #9fe3d0; background: #10251f; }
 .identity-callout div { display: flex; flex-direction: column; }
 .identity-callout strong { font-size: 11px; }

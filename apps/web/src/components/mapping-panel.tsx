@@ -1,18 +1,18 @@
 "use client";
 
 import { ChangeEvent, useMemo, useState } from "react";
-import { ArrowRight, Braces, CheckCircle2, FileJson2, GitBranch, Globe2, Play, Plus, Save, Trash2, Upload } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp, Braces, CheckCircle2, FileJson2, GitBranch, Globe2, Play, Plus, Save, Trash2, Upload, WandSparkles } from "lucide-react";
 import type { GraphValue, ImportedGraph } from "@/lib/graph-data";
 import type { OntologyCatalog, OntologyObjectType } from "@/lib/ontology-catalog";
 import { IngestionState } from "@/gen/context_hub/v1/context_hub_pb";
 import { publishOntologyCatalog, saveOntologyMapping, startIngestion, uploadWorkspaceSource } from "@/lib/context-hub-client";
 import { RestSourceForm } from "@/components/rest-source-form";
 import { GraphqlSourceForm } from "@/components/graphql-source-form";
+import { applyTransforms, createTransform, migrateLegacyTransform, transformLabel, transformOptions, type MappingTransform, type TransformKind } from "@/lib/mapping-transforms";
 
 export type SourceRecord = Record<string, GraphValue>;
 export type BrowserDataSource = { id: string; fileName: string; kind: "upload" | "rest" | "graphql"; records: SourceRecord[] };
-export type Transform = "None" | "Trim" | "Lowercase" | "Uppercase";
-export type PropertyMapping = { id: string; sourceField: string; targetProperty: string; transform: Transform };
+export type PropertyMapping = { id: string; sourceField: string; targetProperty: string; transforms: MappingTransform[] };
 export type ObjectMapping = { id: string; objectType: string; displayProperty: string; properties: PropertyMapping[] };
 export type LinkMapping = { id: string; sourceObjectMappingId: string; sourceField: string; linkType: string; missingTarget: "create" | "skip" | "error" };
 
@@ -61,14 +61,6 @@ function detectType(records: SourceRecord[], field: string) {
   return value === null || value === undefined ? "Unknown" : typeof value === "number" ? "Number" : typeof value === "boolean" ? "Boolean" : "String";
 }
 
-function applyTransform(value: GraphValue, transform: Transform): GraphValue {
-  if (typeof value !== "string") return value;
-  if (transform === "Trim") return value.trim();
-  if (transform === "Lowercase") return value.toLowerCase();
-  if (transform === "Uppercase") return value.toUpperCase();
-  return value;
-}
-
 function matchingField(fields: string[], property: string, objectType: string) {
   return fields.find((field) => field === property)
     ?? fields.find((field) => field === `${objectType}_${property}`)
@@ -86,7 +78,7 @@ function matchingLinkField(fields: string[], link: OntologyCatalog["linkTypes"][
 function makeObjectMapping(type: OntologyObjectType, fields: string[], records: SourceRecord[]): ObjectMapping {
   const properties = type.properties.filter((property) => !property.derived).map((property) => {
     const sourceField = matchingField(fields, property.apiName, type.apiName);
-    return { id: newId(), sourceField, targetProperty: property.apiName, transform: sourceField && typeof records[0]?.[sourceField] === "string" ? "Trim" as const : "None" as const };
+    return { id: newId(), sourceField, targetProperty: property.apiName, transforms: sourceField && typeof records[0]?.[sourceField] === "string" ? [{ kind: "trim" as const }] : [] };
   }).filter((mapping) => mapping.sourceField);
   return { id: newId(), objectType: type.apiName, displayProperty: type.properties.find((property) => property.apiName === "name")?.apiName ?? type.properties[0]?.apiName ?? "", properties };
 }
@@ -108,7 +100,13 @@ function prepareSourceMapping(ontologyId: string, ontology: OntologyCatalog, fil
       const candidate = JSON.parse(saved) as { revision?: number; backendMappingId?: string; fileName?: string; objectMappings?: ObjectMapping[]; linkMappings?: LinkMapping[] };
       const typesStillExist = candidate.objectMappings?.every((mapping) => ontology.objectTypes.some((type) => type.apiName === mapping.objectType));
       if (candidate.fileName === fileName && candidate.objectMappings?.length && typesStillExist) {
-        objectMappings = candidate.objectMappings;
+        objectMappings = candidate.objectMappings.map((mapping) => ({
+          ...mapping,
+          properties: mapping.properties.map((property) => {
+            const legacy = property as PropertyMapping & { transform?: unknown };
+            return { ...property, transforms: migrateLegacyTransform(property.transforms ?? legacy.transform) };
+          }),
+        }));
         linkMappings = candidate.linkMappings ?? [];
         revision = candidate.revision ?? 0;
         return { objectMappings, linkMappings, revision, backendMappingId: candidate.backendMappingId ?? "" };
@@ -140,9 +138,15 @@ export function buildImportedGraph(options: {
     const identityMapping = mapping.properties.find((property) => property.targetProperty === identityProperty?.apiName);
     if (!objectType || !identityProperty || !identityMapping) continue;
     for (const record of records) {
-      const identity = record[identityMapping.sourceField];
+      let properties: Record<string, GraphValue>;
+      try {
+        properties = Object.fromEntries(mapping.properties.map((property) => [property.targetProperty, applyTransforms(record[property.sourceField] ?? null, property.transforms, record)])) as Record<string, GraphValue>;
+      } catch {
+        skippedCount += 1;
+        continue;
+      }
+      const identity = properties[identityProperty.apiName];
       if (identity === null || identity === undefined || String(identity).trim() === "") { skippedCount += 1; continue; }
-      const properties = Object.fromEntries(mapping.properties.map((property) => [property.targetProperty, applyTransform(record[property.sourceField] ?? null, property.transform)])) as Record<string, GraphValue>;
       const id = `${objectType.apiName}:${String(identity)}`;
       nodes.set(id, { id, name: String(properties[mapping.displayProperty] ?? identity), kind: objectType.displayName, group: objectType.displayName, color: colors[mappingIndex % colors.length], properties });
     }
@@ -158,7 +162,12 @@ export function buildImportedGraph(options: {
     const sourceIdentityMapping = sourceMapping?.properties.find((property) => property.targetProperty === sourceIdentity?.apiName);
     if (!sourceMapping || !linkType || !sourceType || !targetType || !sourceIdentityMapping || !targetIdentity) continue;
     for (const record of records) {
-      const sourceValue = record[sourceIdentityMapping.sourceField];
+      let sourceValue: GraphValue;
+      try {
+        sourceValue = applyTransforms(record[sourceIdentityMapping.sourceField] ?? null, sourceIdentityMapping.transforms, record);
+      } catch {
+        continue;
+      }
       if (sourceValue === null || sourceValue === undefined) continue;
       const values = Array.isArray(record[mapping.sourceField]) ? record[mapping.sourceField] as GraphValue[] : [record[mapping.sourceField]];
       for (const targetValue of values) {
@@ -182,6 +191,45 @@ export function buildImportedGraph(options: {
       linkTypes: [...new Set(linkMappings.map((mapping) => mapping.linkType))],
     },
   };
+}
+
+function fieldsFromText(value: string) {
+  return value.split(",").map((field) => field.trim()).filter(Boolean);
+}
+
+function TransformParameters({ transform, onChange }: { transform: MappingTransform; onChange: (value: MappingTransform) => void }) {
+  if (transform.kind === "cast") return <label>Target type<select aria-label="Cast target" value={transform.target} onChange={(event) => onChange({ ...transform, target: event.target.value as typeof transform.target })}><option value="string">String</option><option value="boolean">Boolean</option><option value="int64">Int64</option><option value="float64">Float64</option><option value="decimal">Decimal</option><option value="date">Date</option><option value="timestamp">Timestamp</option></select></label>;
+  if (transform.kind === "replace") return <><label>Find<input aria-label="Find text" value={transform.from} onChange={(event) => onChange({ ...transform, from: event.target.value })}/></label><label>Replace with<input aria-label="Replacement text" value={transform.to} onChange={(event) => onChange({ ...transform, to: event.target.value })}/></label></>;
+  if (transform.kind === "regex_replace") return <><label>Pattern<input aria-label="Regex pattern" value={transform.pattern} onChange={(event) => onChange({ ...transform, pattern: event.target.value })}/></label><label>Replacement<input aria-label="Regex replacement" value={transform.replacement} onChange={(event) => onChange({ ...transform, replacement: event.target.value })}/></label></>;
+  if (transform.kind === "default") return <label>JSON or text value<input aria-label="Default value" value={transform.value} onChange={(event) => onChange({ ...transform, value: event.target.value })}/></label>;
+  if (transform.kind === "coalesce") return <label>Fallback fields<input aria-label="Fallback fields" list="mapping-source-fields" placeholder="field_a, field_b" value={transform.fields.join(", ")} onChange={(event) => onChange({ ...transform, fields: fieldsFromText(event.target.value) })}/></label>;
+  if (transform.kind === "concat") return <><label>Additional fields<input aria-label="Concatenation fields" list="mapping-source-fields" placeholder="field_a, field_b" value={transform.fields.join(", ")} onChange={(event) => onChange({ ...transform, fields: fieldsFromText(event.target.value) })}/></label><label>Separator<input aria-label="Concatenation separator" value={transform.separator} onChange={(event) => onChange({ ...transform, separator: event.target.value })}/></label></>;
+  if (transform.kind === "add" || transform.kind === "multiply") return <label>Number<input aria-label={`${transformLabel(transform)} value`} type="number" step="any" value={transform.value} onChange={(event) => onChange({ ...transform, value: Number(event.target.value) })}/></label>;
+  if (transform.kind === "parse_date" || transform.kind === "parse_timestamp") return <label>Format<input aria-label={`${transformLabel(transform)} format`} placeholder="%Y-%m-%d" value={transform.format} onChange={(event) => onChange({ ...transform, format: event.target.value })}/></label>;
+  return <span className="transform-no-parameters">No parameters</span>;
+}
+
+function TransformEditor({ transforms, onChange }: { transforms: MappingTransform[]; onChange: (value: MappingTransform[]) => void }) {
+  function replace(index: number, transform: MappingTransform) {
+    onChange(transforms.map((item, itemIndex) => itemIndex === index ? transform : item));
+  }
+  function move(index: number, offset: number) {
+    const next = [...transforms];
+    const target = index + offset;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  }
+  return <div className="transform-editor">
+    <div className="transform-editor-title"><span><WandSparkles size={12}/> Transformation pipeline</span><select aria-label="Add transformation" value="" onChange={(event) => { if (event.target.value) onChange([...transforms, createTransform(event.target.value as TransformKind)]); }}><option value="">+ Add transform</option>{transformOptions.map((option) => <option value={option.kind} key={option.kind}>{option.label}</option>)}</select></div>
+    {!transforms.length && <span className="transform-empty">Source value is used unchanged.</span>}
+    {transforms.map((transform, index) => <div className="transform-step" key={`${index}-${transform.kind}`}>
+      <span className="transform-order">{index + 1}</span>
+      <select aria-label={`Transformation ${index + 1}`} value={transform.kind} onChange={(event) => replace(index, createTransform(event.target.value as TransformKind))}>{transformOptions.map((option) => <option value={option.kind} key={option.kind}>{option.label}</option>)}</select>
+      <div className="transform-parameters"><TransformParameters transform={transform} onChange={(value) => replace(index, value)}/></div>
+      <div className="transform-step-actions"><button aria-label="Move transformation up" disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={11}/></button><button aria-label="Move transformation down" disabled={index === transforms.length - 1} onClick={() => move(index, 1)}><ArrowDown size={11}/></button><button aria-label="Delete transformation" onClick={() => onChange(transforms.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={11}/></button></div>
+    </div>)}
+  </div>;
 }
 
 export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology, dataSource, onDataSourceLoaded, onImport }: { ontologyId: string; ontologyName: string; ontologySlug: string; ontology: OntologyCatalog; dataSource: BrowserDataSource | null; onDataSourceLoaded: (source: BrowserDataSource) => void; onImport: (graph: ImportedGraph) => void }) {
@@ -249,7 +297,7 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
     const target = activeType.properties.find((property) => !property.derived && !activeMapping.properties.some((mapping) => mapping.targetProperty === property.apiName));
     const source = sourceFields.find((field) => !activeMapping.properties.some((mapping) => mapping.sourceField === field));
     if (!target || !source) return;
-    updateObjectMapping({ properties: [...activeMapping.properties, { id: newId(), sourceField: source, targetProperty: target.apiName, transform: "None" }] });
+    updateObjectMapping({ properties: [...activeMapping.properties, { id: newId(), sourceField: source, targetProperty: target.apiName, transforms: [] }] });
   }
 
   function addLinkMapping() {
@@ -340,8 +388,8 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
         <div className="section-title"><div><span className="eyebrow">Object mappings</span><h2>Source record → ontology object</h2></div><button onClick={addObjectMapping} disabled={!records.length || !ontology.objectTypes.length}><Plus size={14}/> Object mapping</button></div>
         <div className="mapping-tabs">{objectMappings.map((mapping) => { const type = ontology.objectTypes.find((item) => item.apiName === mapping.objectType); return <button className={mapping.id === activeMapping?.id ? "active" : ""} key={mapping.id} onClick={() => setActiveMappingId(mapping.id)}>{type?.displayName ?? mapping.objectType}</button>; })}</div>
         {activeMapping && activeType ? <><div className="mapping-settings"><label>Ontology Object Type<select value={activeMapping.objectType} onChange={(event) => changeObjectType(event.target.value)}>{ontology.objectTypes.map((type) => <option value={type.apiName} key={type.apiName}>{type.displayName} ({type.apiName})</option>)}</select></label><label>Display property<select value={activeMapping.displayProperty} onChange={(event) => updateObjectMapping({ displayProperty: event.target.value })}>{activeType.properties.map((property) => <option value={property.apiName} key={property.apiName}>{property.displayName}</option>)}</select></label><label>Identity property<input value={activeType.properties.find((property) => property.identity)?.apiName ?? "Missing in ontology"} readOnly/></label></div>
-          <div className="mapping-column-head"><span>Source field</span><span/><span>Ontology property</span><span>Transform</span><span/></div>
-          {activeMapping.properties.map((mapping) => <div className="mapping-row ontology-bound" key={mapping.id}><select value={mapping.sourceField} onChange={(event) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, sourceField: event.target.value } : item) })}>{sourceFields.map((field) => <option key={field}>{field}</option>)}</select><ArrowRight size={15}/><select value={mapping.targetProperty} onChange={(event) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, targetProperty: event.target.value } : item) })}>{activeType.properties.filter((property) => !property.derived).map((property) => <option value={property.apiName} key={property.apiName}>{activeType.apiName}.{property.apiName}</option>)}</select><select value={mapping.transform} onChange={(event) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, transform: event.target.value as Transform } : item) })}><option>None</option><option>Trim</option><option>Lowercase</option><option>Uppercase</option></select><button title="Delete property mapping" onClick={() => updateObjectMapping({ properties: activeMapping.properties.filter((item) => item.id !== mapping.id) })}><Trash2 size={13}/></button></div>)}
+          <div className="mapping-column-head"><span>Source field</span><span/><span>Ontology property</span><span>Pipeline</span><span/></div>
+          {activeMapping.properties.map((mapping) => <div className="mapping-row ontology-bound" key={mapping.id}><select value={mapping.sourceField} onChange={(event) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, sourceField: event.target.value } : item) })}>{sourceFields.map((field) => <option key={field}>{field}</option>)}</select><ArrowRight size={15}/><select value={mapping.targetProperty} onChange={(event) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, targetProperty: event.target.value } : item) })}>{activeType.properties.filter((property) => !property.derived).map((property) => <option value={property.apiName} key={property.apiName}>{activeType.apiName}.{property.apiName}</option>)}</select><span className="transform-count">{mapping.transforms.length ? `${mapping.transforms.length} step${mapping.transforms.length === 1 ? "" : "s"}` : "Unchanged"}</span><button title="Delete property mapping" onClick={() => updateObjectMapping({ properties: activeMapping.properties.filter((item) => item.id !== mapping.id) })}><Trash2 size={13}/></button><TransformEditor transforms={mapping.transforms} onChange={(transforms) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, transforms } : item) })}/></div>)}
           <div className="mapping-actions"><button onClick={addPropertyMapping}><Plus size={13}/> Property mapping</button>{objectMappings.length > 1 && <button className="danger-text" onClick={() => { setObjectMappings((items) => items.filter((item) => item.id !== activeMapping.id)); setLinkMappings((items) => items.filter((item) => item.sourceObjectMappingId !== activeMapping.id)); setActiveMappingId(objectMappings.find((item) => item.id !== activeMapping.id)?.id ?? ""); }}><Trash2 size={13}/> Delete object mapping</button>}</div></> : <div className="mapping-empty">Choose a file to create the first ontology mapping.</div>}
 
         <div className="link-mapping-section"><div className="section-title"><div><span className="eyebrow">Link mappings</span><h2>Source reference → ontology link</h2></div><button onClick={addLinkMapping} disabled={!objectMappings.length}><Plus size={14}/> Link mapping</button></div>
@@ -356,6 +404,7 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
       </section>
     </div>
     {previewGraph && <section className="preview-table"><div className="section-title"><div><span className="eyebrow">Ontology preview</span><h2>{previewGraph.nodes.length.toLocaleString("de-DE")} objects · {previewGraph.links.length.toLocaleString("de-DE")} links</h2></div><span className="success-pill"><CheckCircle2 size={13}/> Based on {previewGraph.recordCount.toLocaleString("de-DE")} records</span></div><div className="preview-summary"><div><strong>{previewGraph.nodes.length.toLocaleString("de-DE")}</strong><span>Objects</span></div><div><strong>{previewGraph.links.length.toLocaleString("de-DE")}</strong><span>Links</span></div><div><strong>{previewGraph.linkErrorCount.toLocaleString("de-DE")}</strong><span>Link errors</span></div></div></section>}
+    <datalist id="mapping-source-fields">{sourceFields.map((field) => <option value={field} key={field}/>)}</datalist>
     {showRestSource && <RestSourceForm onClose={() => setShowRestSource(false)} onCreated={onDataSourceLoaded}/>}
     {showGraphqlSource && <GraphqlSourceForm onClose={() => setShowGraphqlSource(false)} onCreated={onDataSourceLoaded}/>}
   </div>;

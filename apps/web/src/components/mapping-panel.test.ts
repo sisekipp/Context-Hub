@@ -7,8 +7,8 @@ const serviceMapping: ObjectMapping = {
   objectType: "service",
   displayProperty: "name",
   properties: [
-    { id: "id", sourceField: "service_id", targetProperty: "id", transform: "None" },
-    { id: "name", sourceField: "name", targetProperty: "name", transform: "Trim" },
+    { id: "id", sourceField: "service_id", targetProperty: "id", transforms: [] },
+    { id: "name", sourceField: "name", targetProperty: "name", transforms: [{ kind: "trim" }] },
   ],
 };
 
@@ -52,8 +52,8 @@ describe("ontology-bound file mapping", () => {
     const teamMapping: ObjectMapping = {
       id: "teams", objectType: "team", displayProperty: "name",
       properties: [
-        { id: "team-id", sourceField: "owner_team", targetProperty: "id", transform: "None" },
-        { id: "team-name", sourceField: "owner_team", targetProperty: "name", transform: "None" },
+        { id: "team-id", sourceField: "owner_team", targetProperty: "id", transforms: [] },
+        { id: "team-name", sourceField: "owner_team", targetProperty: "name", transforms: [] },
       ],
     };
     const links: LinkMapping[] = [{ id: "owner", sourceObjectMappingId: "services", sourceField: "owner_team", linkType: "owned_by", missingTarget: "error" }];

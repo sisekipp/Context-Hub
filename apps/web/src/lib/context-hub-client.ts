@@ -11,6 +11,7 @@ import {
 } from "@/gen/context_hub/v1/context_hub_pb";
 import type { OntologyCatalog } from "@/lib/ontology-catalog";
 import type { GraphValue, ImportedGraph } from "@/lib/graph-data";
+import { serializeTransform, type MappingTransform } from "@/lib/mapping-transforms";
 
 export const DEV_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -64,7 +65,7 @@ export type GraphqlSourceInput = {
 export type BackendFieldMapping = {
   sourceField: string;
   targetProperty: string;
-  transform: "None" | "Trim" | "Lowercase" | "Uppercase";
+  transforms: MappingTransform[];
 };
 
 export type BackendObjectMapping = {
@@ -292,9 +293,6 @@ function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapp
   const identityFields = objectMapping.properties
     .filter((field) => field.targetProperty === objectMapping.identityProperty)
     .map((field) => field.sourceField);
-  const transforms: Record<BackendFieldMapping["transform"], Array<{ kind: string }>> = {
-    None: [], Trim: [{ kind: "trim" }], Lowercase: [{ kind: "lowercase" }], Uppercase: [{ kind: "uppercase" }],
-  };
   return {
     id: crypto.randomUUID(),
     object_type: objectMapping.objectType,
@@ -302,7 +300,7 @@ function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapp
     fields: objectMapping.properties.map((field) => ({
       source: field.sourceField,
       target: field.targetProperty,
-      transforms: transforms[field.transform],
+      transforms: field.transforms.map(serializeTransform),
       on_error: "reject_row",
     })),
     links: links.filter((link) => link.sourceObjectType === objectMapping.objectType).map((link) => ({
