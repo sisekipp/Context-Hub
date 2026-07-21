@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ForceGraphMethods as ForceGraph2DMethods, NodeObject as NodeObject2D } from "react-force-graph-2d";
 import type { ForceGraphMethods as ForceGraph3DMethods, NodeObject as NodeObject3D } from "react-force-graph-3d";
 import { CanvasTexture, LinearFilter, Sprite, SpriteMaterial, SRGBColorSpace } from "three";
@@ -10,7 +10,7 @@ import {
   Maximize2, Minus, Network, Plus, RotateCcw, Search, Tags, X,
 } from "lucide-react";
 import { GraphQueryBuilder } from "@/components/graph-query-builder";
-import type { GraphQuerySpec } from "@/lib/context-hub-client";
+import type { BackendPropertyProvenance, GraphQuerySpec } from "@/lib/context-hub-client";
 import type { ImportedGraph, ImportedGraphNode } from "@/lib/graph-data";
 import type { OntologyCatalog } from "@/lib/ontology-catalog";
 
@@ -63,6 +63,7 @@ function create3dLabel(node: VisualNode) {
 
 export function GraphExplorer({
   graph, ontology, onOpenMapping, onOpenOntology, onLoadMore, onRunQuery, onExpandNode,
+  onLoadProvenance,
   canLoadMore = false, loadingMore = false, queryBusy = false, expandingNodeId = "",
 }: {
   graph: ImportedGraph;
@@ -74,6 +75,7 @@ export function GraphExplorer({
   loadingMore?: boolean;
   onRunQuery: (spec: GraphQuerySpec) => Promise<void>;
   onExpandNode: (node: ImportedGraphNode) => Promise<void>;
+  onLoadProvenance: (node: ImportedGraphNode) => Promise<BackendPropertyProvenance[]>;
   queryBusy?: boolean;
   expandingNodeId?: string;
 }) {
@@ -90,6 +92,19 @@ export function GraphExplorer({
   const [filterOpen, setFilterOpen] = useState(false);
   const [queryOpen, setQueryOpen] = useState(false);
   const [nodeLimit, setNodeLimit] = useState(750);
+  const [provenanceResult, setProvenanceResult] = useState<{ nodeId: string; items: BackendPropertyProvenance[]; error: string }>({ nodeId: "", items: [], error: "" });
+  const provenance = selected?.id === provenanceResult.nodeId ? provenanceResult.items : [];
+  const provenanceError = selected?.id === provenanceResult.nodeId ? provenanceResult.error : "";
+  const provenanceLoading = !!selected && selected.id !== provenanceResult.nodeId;
+
+  useEffect(() => {
+    if (!selected) return;
+    let cancelled = false;
+    void onLoadProvenance(selected)
+      .then((loaded) => { if (!cancelled) setProvenanceResult({ nodeId: selected.id, items: loaded, error: "" }); })
+      .catch((cause) => { if (!cancelled) setProvenanceResult({ nodeId: selected.id, items: [], error: cause instanceof Error ? cause.message : "Provenance is unavailable." }); });
+    return () => { cancelled = true; };
+  }, [onLoadProvenance, selected]);
 
   const kindSummary = useMemo(() => {
     const summary = new Map<string, { count: number; color: string }>();
@@ -272,7 +287,7 @@ export function GraphExplorer({
 
       {focusId && <div className="focus-breadcrumb"><Focus size={13}/><span>Neighborhood</span><strong>{graph.nodes.find((node) => node.id === focusId)?.name}</strong><button onClick={() => navigateTo(null)}><X size={13}/></button></div>}
 
-      {selected && <aside className="floating-inspector"><button className="inspector-close" onClick={() => setSelected(null)} aria-label="Close inspector"><X size={14}/></button><span className="type-pill" style={{ color: selected.color }}>{selected.kind}</span><h2>{selected.name}</h2><span className="mono-id">{selected.id}</span><div className="inspector-section"><span className="eyebrow">Properties</span>{Object.entries(selected.properties).slice(0, 8).map(([key, value]) => <div className="detail-row" key={key}><span>{key}</span><strong title={typeof value === "object" ? JSON.stringify(value) : String(value ?? "")}>{typeof value === "object" ? JSON.stringify(value) : String(value ?? "")}</strong></div>)}</div><div className="inspector-section"><span className="eyebrow">Relationships · {selectedRelations.length}</span>{selectedRelations.slice(0, 8).map((relation, index) => <button className="relation-row" key={`${relation.direction}-${relation.objectId}-${index}`} onClick={() => navigateTo(relation.objectId)}><span>{relation.direction === "outgoing" ? "→" : "←"} {relation.label}</span><strong>{relation.object}</strong></button>)}{!selectedRelations.length && <p className="muted-copy">No loaded relationships.</p>}</div><button className="button secondary full" disabled={expandingNodeId === selected.id} onClick={() => void expandNode(selected)}><GitBranch size={14}/> {expandingNodeId === selected.id ? "Loading connections…" : "Load connected objects"}</button></aside>}
+      {selected && <aside className="floating-inspector"><button className="inspector-close" onClick={() => setSelected(null)} aria-label="Close inspector"><X size={14}/></button><span className="type-pill" style={{ color: selected.color }}>{selected.kind}</span><h2>{selected.name}</h2><span className="mono-id">{selected.id}</span><div className="inspector-section"><span className="eyebrow">Properties</span>{Object.entries(selected.properties).slice(0, 8).map(([key, value]) => { const origin = provenance.find((item) => item.property === key); return <div className="property-provenance" key={key}><div className="detail-row"><span>{key}</span><strong title={typeof value === "object" ? JSON.stringify(value) : String(value ?? "")}>{typeof value === "object" ? JSON.stringify(value) : String(value ?? "")}</strong></div>{origin && <small title={`Mapping ${origin.ontologyMappingName} · Job ${origin.ingestionJobId}`}>{origin.dataSourceName} · {origin.sourceField}{origin.importedAt ? ` · ${origin.importedAt.toLocaleString("de-DE")}` : ""}</small>}</div>; })}{provenanceLoading && <p className="muted-copy">Loading property origins…</p>}{provenanceError && <p className="provenance-error">{provenanceError}</p>}{!provenanceLoading && !provenanceError && !provenance.length && <p className="muted-copy">No property origins were recorded.</p>}</div><div className="inspector-section"><span className="eyebrow">Relationships · {selectedRelations.length}</span>{selectedRelations.slice(0, 8).map((relation, index) => <button className="relation-row" key={`${relation.direction}-${relation.objectId}-${index}`} onClick={() => navigateTo(relation.objectId)}><span>{relation.direction === "outgoing" ? "→" : "←"} {relation.label}</span><strong>{relation.object}</strong></button>)}{!selectedRelations.length && <p className="muted-copy">No loaded relationships.</p>}</div><button className="button secondary full" disabled={expandingNodeId === selected.id} onClick={() => void expandNode(selected)}><GitBranch size={14}/> {expandingNodeId === selected.id ? "Loading connections…" : "Load connected objects"}</button></aside>}
 
       <div className="explorer-status"><span>Showing {data.nodes.length.toLocaleString("de-DE")} of {graph.nodes.length.toLocaleString("de-DE")} loaded objects · {data.links.length.toLocaleString("de-DE")} visible links{canLoadMore ? " · more available" : ""}</span><span>{mode === "2d" ? "Drag to move · Wheel to zoom · Double-click a node to expand" : "Drag to rotate · Right-drag to pan · Wheel to zoom · Double-click to expand"}</span></div>
     </div>

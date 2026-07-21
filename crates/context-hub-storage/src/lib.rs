@@ -356,6 +356,23 @@ pub struct StoredIngestionJob {
     pub stats_json: String,
     pub error: String,
     pub revision: u64,
+    pub created_at_micros: i64,
+    pub started_at_micros: Option<i64>,
+    pub completed_at_micros: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredIngestionEvent {
+    pub workspace_id: Uuid,
+    pub job_id: Uuid,
+    pub source_id: Uuid,
+    pub event_type: String,
+    pub row_number: u64,
+    pub object_type: String,
+    pub external_id: String,
+    pub message: String,
+    pub details_json: String,
+    pub occurred_at_micros: i64,
 }
 
 #[async_trait]
@@ -368,6 +385,16 @@ pub trait ControlPlaneRepository: Send + Sync {
     async fn delete_data_source(&self, value: &StoredDataSource) -> Result<(), StorageError>;
     async fn save_mapping(&self, value: &StoredOntologyMapping) -> Result<(), StorageError>;
     async fn save_job(&self, value: &StoredIngestionJob) -> Result<(), StorageError>;
+    async fn append_ingestion_events(
+        &self,
+        values: &[StoredIngestionEvent],
+    ) -> Result<(), StorageError>;
+    async fn list_ingestion_events(
+        &self,
+        workspace_id: Uuid,
+        job_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<StoredIngestionEvent>, StorageError>;
 }
 
 #[derive(Clone)]
@@ -478,11 +505,17 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
                 })
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
+        let job_times = self.client.query("SELECT toString(id), toUnixTimestamp64Micro(created_at), toUnixTimestamp64Micro(started_at), toUnixTimestamp64Micro(completed_at) FROM ingestion_jobs FINAL WHERE workspace_id = ?")
+            .bind(&workspace).fetch_all::<(String, i64, Option<i64>, Option<i64>)>().await?.into_iter()
+            .map(|row| (row.0, (row.1, row.2, row.3))).collect::<HashMap<_, _>>();
         let job_rows = self.client.query("SELECT toString(id), toString(workspace_id), toString(data_source_id), toString(ontology_mapping_id), toString(ontology_version_id), toInt32(state), stats_json, error, revision FROM ingestion_jobs FINAL WHERE workspace_id = ?")
             .bind(&workspace).fetch_all::<(String, String, String, String, String, i32, String, String, u64)>().await?;
         let jobs = job_rows
             .into_iter()
             .map(|row| {
+                let times = job_times.get(&row.0).copied().ok_or_else(|| {
+                    StorageError::InvalidRecord("ingestion job timestamps are missing".into())
+                })?;
                 Ok(StoredIngestionJob {
                     id: parse_uuid(&row.0, "job id")?,
                     workspace_id: parse_uuid(&row.1, "workspace id")?,
@@ -493,6 +526,9 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
                     stats_json: row.6,
                     error: row.7,
                     revision: row.8,
+                    created_at_micros: times.0,
+                    started_at_micros: times.1,
+                    completed_at_micros: times.2,
                 })
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
@@ -566,7 +602,57 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
                 )));
             }
         };
-        self.insert_json("INSERT INTO ingestion_jobs (id, workspace_id, data_source_id, ontology_mapping_id, ontology_version_id, state, stats_json, error, revision) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "data_source_id": value.data_source_id, "ontology_mapping_id": value.ontology_mapping_id, "ontology_version_id": value.ontology_version_id, "state": state, "stats_json": value.stats_json, "error": value.error, "revision": value.revision })).await
+        let timestamp = |micros| {
+            Ok::<_, StorageError>(
+                timestamp_from_micros(micros)?
+                    .format("%Y-%m-%d %H:%M:%S%.6f")
+                    .to_string(),
+            )
+        };
+        self.insert_json("INSERT INTO ingestion_jobs (id, workspace_id, data_source_id, ontology_mapping_id, ontology_version_id, state, stats_json, error, revision, created_at, started_at, completed_at) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "data_source_id": value.data_source_id, "ontology_mapping_id": value.ontology_mapping_id, "ontology_version_id": value.ontology_version_id, "state": state, "stats_json": value.stats_json, "error": value.error, "revision": value.revision, "created_at": timestamp(value.created_at_micros)?, "started_at": value.started_at_micros.map(timestamp).transpose()?, "completed_at": value.completed_at_micros.map(timestamp).transpose()? })).await
+    }
+
+    async fn append_ingestion_events(
+        &self,
+        values: &[StoredIngestionEvent],
+    ) -> Result<(), StorageError> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        let mut body = String::new();
+        for value in values {
+            body.push_str(&serde_json::to_string(&serde_json::json!({
+                "workspace_id": value.workspace_id,
+                "job_id": value.job_id,
+                "source_id": value.source_id,
+                "event_type": value.event_type,
+                "row_number": value.row_number,
+                "object_type": value.object_type,
+                "external_id": value.external_id,
+                "message": value.message,
+                "details": serde_json::from_str::<serde_json::Value>(&value.details_json)?,
+                "occurred_at": timestamp_from_micros(value.occurred_at_micros)?.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+            }))?);
+            body.push('\n');
+        }
+        let mut insert = self.client.insert_formatted_with("INSERT INTO ingestion_events (workspace_id, job_id, source_id, event_type, row_number, object_type, external_id, message, details, occurred_at) FORMAT JSONEachRow").buffered();
+        insert.write_all(body.as_bytes()).await?;
+        insert.end().await?;
+        Ok(())
+    }
+
+    async fn list_ingestion_events(
+        &self,
+        workspace_id: Uuid,
+        job_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<StoredIngestionEvent>, StorageError> {
+        self.client.query("SELECT toString(source_id), event_type, row_number, object_type, external_id, message, toJSONString(details), toUnixTimestamp64Micro(occurred_at) FROM ingestion_events WHERE workspace_id = ? AND job_id = ? ORDER BY occurred_at, row_number LIMIT ?")
+            .bind(workspace_id.to_string()).bind(job_id.to_string()).bind(limit.min(1_000))
+            .fetch_all::<(String, String, u64, String, String, String, String, i64)>().await?
+            .into_iter().map(|row| Ok(StoredIngestionEvent {
+                workspace_id, job_id, source_id: parse_uuid(&row.0, "source id")?, event_type: row.1, row_number: row.2, object_type: row.3, external_id: row.4, message: row.5, details_json: row.6, occurred_at_micros: row.7,
+            })).collect()
     }
 }
 
@@ -743,6 +829,8 @@ pub struct StoredNode {
     pub ontology_version_id: Uuid,
     pub object_type: String,
     pub object_id: String,
+    pub source_id: Option<Uuid>,
+    pub external_id: Option<String>,
     pub properties_json: String,
 }
 
@@ -977,16 +1065,18 @@ impl ClickHouseGraphRepository {
         object_id: &str,
     ) -> Result<StoredNode, StorageError> {
         let row = self.client
-            .query("SELECT toString(workspace_id), toString(ontology_version_id), object_type, object_id, toJSONString(properties) FROM graph_nodes FINAL WHERE workspace_id = ? AND ontology_version_id = ? AND object_type = ? AND object_id = ? AND deleted = false LIMIT 1")
+            .query("SELECT toString(workspace_id), toString(ontology_version_id), object_type, object_id, toString(source_id), external_id, toJSONString(properties) FROM graph_nodes FINAL WHERE workspace_id = ? AND ontology_version_id = ? AND object_type = ? AND object_id = ? AND deleted = false LIMIT 1")
             .bind(workspace_id.to_string()).bind(ontology_version_id.to_string()).bind(object_type).bind(object_id)
-            .fetch_optional::<(String, String, String, String, String)>().await?
+            .fetch_optional::<(String, String, String, String, String, String, String)>().await?
             .ok_or(StorageError::NotFound)?;
         Ok(StoredNode {
             workspace_id: Uuid::parse_str(&row.0).map_err(|_| StorageError::NotFound)?,
             ontology_version_id: Uuid::parse_str(&row.1).map_err(|_| StorageError::NotFound)?,
             object_type: row.2,
             object_id: row.3,
-            properties_json: row.4,
+            source_id: Some(parse_uuid(&row.4, "source id")?),
+            external_id: Some(row.5),
+            properties_json: row.6,
         })
     }
 }
@@ -1019,6 +1109,8 @@ impl GraphRepository for ClickHouseGraphRepository {
                     ontology_version_id: query.ontology_version_id,
                     object_id: row.0,
                     object_type: row.1,
+                    source_id: None,
+                    external_id: None,
                     properties_json: row.2,
                 })
             })
@@ -1367,6 +1459,8 @@ fn stored_node_from_write(node: &GraphNodeWrite) -> StoredNode {
         ontology_version_id: node.ontology_version_id,
         object_type: node.object_type.clone(),
         object_id: node.object_id.clone(),
+        source_id: Some(node.source_id),
+        external_id: Some(node.external_id.clone()),
         properties_json: node.properties_json.clone(),
     }
 }

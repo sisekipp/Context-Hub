@@ -11,17 +11,20 @@ use context_hub_api::context_hub::v1::GraphFilter as ApiGraphFilter;
 use context_hub_api::context_hub::v1::{
     CreateOntologyRequest, DataSource, DataSourceUsage, DeleteDataSourceRequest,
     ExecuteFunctionRequest, ExecuteFunctionResponse, ExpandGraphRequest, GetDataSourceUsageRequest,
-    GetDataSourceUsageResponse, GetIngestionJobRequest, GetObjectRequest, GetOntologyDraftRequest,
+    GetDataSourceUsageResponse, GetIngestionJobRequest, GetObjectProvenanceRequest,
+    GetObjectProvenanceResponse, GetObjectRequest, GetOntologyDraftRequest,
     GetUploadDataSourceRequest, GetUploadDataSourceResponse, GetWorkspaceRequest,
-    GraphAggregationResult, GraphEdge, GraphNode, GraphQuery, ImportGraphRequest, IngestionJob,
-    IngestionState, ListDataSourcesRequest, ListDataSourcesResponse, ListOntologiesRequest,
-    ListOntologiesResponse, ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse,
-    ListOntologyVersionsRequest, ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology,
-    OntologyDataMapping, OntologyDraft, OntologyVersion, PreviewDataSourceRequest,
-    PreviewDataSourceResponse, PublishOntologyRequest, QueryGraphResponse, SaveDataSourceRequest,
-    SaveOntologyDataMappingRequest, SaveOntologyDraftRequest, StartIngestionRequest,
-    UploadDataSourceRequest, UploadDataSourceResponse, ValidateOntologyRequest,
-    ValidateOntologyResponse, ValidationIssue, Workspace,
+    GraphAggregationResult, GraphEdge, GraphNode, GraphQuery, ImportGraphRequest, IngestionEvent,
+    IngestionJob, IngestionState, ListDataSourcesRequest, ListDataSourcesResponse,
+    ListIngestionEventsRequest, ListIngestionEventsResponse, ListIngestionJobsRequest,
+    ListIngestionJobsResponse, ListOntologiesRequest, ListOntologiesResponse,
+    ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse, ListOntologyVersionsRequest,
+    ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology, OntologyDataMapping,
+    OntologyDraft, OntologyVersion, PreviewDataSourceRequest, PreviewDataSourceResponse,
+    PropertyProvenance, PublishOntologyRequest, QueryGraphResponse, RetryIngestionJobRequest,
+    SaveDataSourceRequest, SaveOntologyDataMappingRequest, SaveOntologyDraftRequest,
+    StartIngestionRequest, UploadDataSourceRequest, UploadDataSourceResponse,
+    ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue, Workspace,
     data_source_service_server::{DataSourceService, DataSourceServiceServer},
     function_service_server::{FunctionService, FunctionServiceServer},
     graph_service_server::{GraphService, GraphServiceServer},
@@ -50,8 +53,8 @@ use context_hub_storage::{
     GraphRepository, GraphSort as StorageGraphSort, ObjectStoreSourceRepository, PropertyIndexKind,
     PropertyIndexValue, PropertyIndexWrite, SortDirection as StorageSortDirection,
     SortKind as StorageSortKind, SourceObjectStore, StorageError, StoredDataSource,
-    StoredIngestionJob, StoredOntology, StoredOntologyDraft, StoredOntologyMapping,
-    StoredOntologyVersion, TraversalStep as StorageTraversalStep,
+    StoredIngestionEvent, StoredIngestionJob, StoredOntology, StoredOntologyDraft,
+    StoredOntologyMapping, StoredOntologyVersion, TraversalStep as StorageTraversalStep,
 };
 #[cfg(test)]
 use context_hub_storage::{MemoryGraphRepository, MemorySourceObjectStore};
@@ -79,6 +82,7 @@ struct Runtime {
     data_sources: Arc<RwLock<HashMap<String, DataSource>>>,
     mappings: Arc<RwLock<HashMap<String, OntologyDataMapping>>>,
     jobs: Arc<RwLock<HashMap<String, IngestionJob>>>,
+    events: Arc<RwLock<HashMap<String, Vec<IngestionEvent>>>>,
     graph: Arc<dyn GraphRepository>,
     source_store: Arc<dyn SourceObjectStore>,
     control_plane: Option<Arc<dyn ControlPlaneRepository>>,
@@ -134,6 +138,7 @@ impl Runtime {
             data_sources: Arc::default(),
             mappings: Arc::default(),
             jobs: Arc::default(),
+            events: Arc::default(),
             graph,
             source_store,
             control_plane,
@@ -367,6 +372,65 @@ impl Runtime {
         Ok(())
     }
 
+    async fn append_ingestion_events(&self, values: Vec<IngestionEvent>) -> Result<(), Status> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        if let Some(repository) = &self.control_plane {
+            let stored = values
+                .iter()
+                .map(stored_ingestion_event)
+                .collect::<Result<Vec<_>, _>>()?;
+            repository
+                .append_ingestion_events(&stored)
+                .await
+                .map_err(storage_status)?;
+        }
+        let mut events = self.events.write().await;
+        for value in values {
+            events.entry(value.job_id.clone()).or_default().push(value);
+        }
+        Ok(())
+    }
+
+    async fn execute_direct_graph_import(
+        &self,
+        mut job: IngestionJob,
+        nodes: &[GraphNodeWrite],
+        edges: &[GraphEdgeWrite],
+    ) -> Result<IngestionJob, Status> {
+        match self.graph.write_graph(nodes, edges).await {
+            Ok(()) => {
+                job.state = IngestionState::Succeeded as i32;
+                job.nodes_written = nodes.len() as u64;
+                job.edges_written = edges.len() as u64;
+            }
+            Err(error) => {
+                job.state = IngestionState::Failed as i32;
+                job.error = error.to_string();
+            }
+        }
+        job.completed_at = Some(timestamp(Utc::now()));
+        let succeeded = job.state == IngestionState::Succeeded as i32;
+        self.append_ingestion_events(vec![ingestion_event(
+            &job.id,
+            &job.data_source_id,
+            if succeeded { "completed" } else { "failed" },
+            0,
+            "",
+            if succeeded {
+                "graph import completed"
+            } else {
+                &job.error
+            },
+            "{}",
+        )])
+        .await?;
+        self.persist_job(&job).await?;
+        self.jobs.write().await.insert(job.id.clone(), job.clone());
+        Ok(job)
+    }
+
     async fn ingestion_scope(
         &self,
         data_source_id: &str,
@@ -448,6 +512,7 @@ impl Runtime {
             let mut jobs = self.jobs.write().await;
             jobs.get_mut(&job_id).map(|job| {
                 job.state = IngestionState::Running as i32;
+                job.started_at = Some(timestamp(Utc::now()));
                 job.clone()
             })
         };
@@ -456,7 +521,19 @@ impl Runtime {
         {
             tracing::error!(%error, %job_id, "failed to persist running ingestion job");
         }
+        let _ = self
+            .append_ingestion_events(vec![ingestion_event(
+                &job_id,
+                &source.id,
+                "started",
+                0,
+                "",
+                "ingestion started",
+                "{}",
+            )])
+            .await;
         let result = self.ingest_source(&source, &mapping, &version).await;
+        let mut result_events = Vec::new();
         let completed = {
             let mut jobs = self.jobs.write().await;
             let Some(job) = jobs.get_mut(&job_id) else {
@@ -464,19 +541,50 @@ impl Runtime {
             };
             match result {
                 Ok(mapped) => {
+                    result_events.extend(mapped.issues.iter().map(|issue| {
+                        ingestion_event(
+                            &job_id,
+                            &source.id,
+                            match issue.strategy {
+                                context_hub_mapping::ErrorStrategy::UseNull => "field_null",
+                                context_hub_mapping::ErrorStrategy::RejectRow => "row_rejected",
+                                context_hub_mapping::ErrorStrategy::AbortJob => "failed",
+                            },
+                            issue.row_number,
+                            &issue.object_type,
+                            &issue.message,
+                            &serde_json::json!({ "field": issue.field }).to_string(),
+                        )
+                    }));
                     job.state = IngestionState::Succeeded as i32;
                     job.rows_read = mapped.rows_read;
                     job.rows_rejected = mapped.rows_rejected;
                     job.nodes_written = mapped.nodes.len() as u64;
                     job.edges_written = mapped.edges.len() as u64;
+                    result_events.push(ingestion_event(
+                        &job_id,
+                        &source.id,
+                        "completed",
+                        0,
+                        "",
+                        "ingestion completed",
+                        "{}",
+                    ));
                 }
                 Err(error) => {
                     job.state = IngestionState::Failed as i32;
-                    job.error = error;
+                    job.error.clone_from(&error);
+                    result_events.push(ingestion_event(
+                        &job_id, &source.id, "failed", 0, "", &error, "{}",
+                    ));
                 }
             }
+            job.completed_at = Some(timestamp(Utc::now()));
             job.clone()
         };
+        if let Err(error) = self.append_ingestion_events(result_events).await {
+            tracing::error!(%error, %job_id, "failed to persist ingestion events");
+        }
         if let Err(error) = self.persist_job(&completed).await {
             tracing::error!(%error, %job_id, "failed to persist completed ingestion job");
         }
@@ -519,7 +627,22 @@ impl Runtime {
     async fn fail_unrecoverable_job(&self, mut job: IngestionJob, reason: &str) {
         job.state = IngestionState::Failed as i32;
         job.error = format!("ingestion job could not be resumed: {reason}");
+        job.completed_at = Some(timestamp(Utc::now()));
         self.jobs.write().await.insert(job.id.clone(), job.clone());
+        if let Err(error) = self
+            .append_ingestion_events(vec![ingestion_event(
+                &job.id,
+                &job.data_source_id,
+                "failed",
+                0,
+                "",
+                &job.error,
+                "{}",
+            )])
+            .await
+        {
+            tracing::error!(%error, job_id = %job.id, "failed to persist unrecoverable ingestion event");
+        }
         if let Err(error) = self.persist_job(&job).await {
             tracing::error!(%error, job_id = %job.id, "failed to persist unrecoverable ingestion job");
         }
@@ -1411,6 +1534,9 @@ impl IngestionService for Runtime {
             ontology_mapping_id: request.ontology_mapping_id,
             ontology_version_id: request.ontology_version_id,
             workspace_id: source.workspace_id.clone(),
+            created_at: Some(timestamp(Utc::now())),
+            started_at: None,
+            completed_at: None,
         };
         self.persist_job(&job).await?;
         self.jobs.write().await.insert(job.id.clone(), job.clone());
@@ -1512,22 +1638,15 @@ impl IngestionService for Runtime {
             ontology_mapping_id: mapping.id,
             ontology_version_id: version.id,
             workspace_id: source.workspace_id,
+            created_at: Some(timestamp(Utc::now())),
+            started_at: Some(timestamp(Utc::now())),
+            completed_at: None,
         };
         self.persist_job(&job).await?;
         self.jobs.write().await.insert(job.id.clone(), job.clone());
-        match self.graph.write_graph(&nodes, &edges).await {
-            Ok(()) => {
-                job.state = IngestionState::Succeeded as i32;
-                job.nodes_written = nodes.len() as u64;
-                job.edges_written = edges.len() as u64;
-            }
-            Err(error) => {
-                job.state = IngestionState::Failed as i32;
-                job.error = error.to_string();
-            }
-        }
-        self.persist_job(&job).await?;
-        self.jobs.write().await.insert(job.id.clone(), job.clone());
+        job = self
+            .execute_direct_graph_import(job, &nodes, &edges)
+            .await?;
         Ok(Response::new(job))
     }
 
@@ -1542,6 +1661,102 @@ impl IngestionService for Runtime {
             .cloned()
             .map(Response::new)
             .ok_or_else(|| Status::not_found("ingestion job not found"))
+    }
+
+    async fn list_jobs(
+        &self,
+        request: Request<ListIngestionJobsRequest>,
+    ) -> Result<Response<ListIngestionJobsResponse>, Status> {
+        let request = request.into_inner();
+        if request.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        let mapping_ids = self
+            .mappings
+            .read()
+            .await
+            .values()
+            .filter(|mapping| {
+                request.ontology_id.is_empty() || mapping.ontology_id == request.ontology_id
+            })
+            .map(|mapping| mapping.id.clone())
+            .collect::<HashSet<_>>();
+        let mut jobs = self
+            .jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| {
+                job.workspace_id == request.workspace_id
+                    && mapping_ids.contains(&job.ontology_mapping_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        jobs.sort_by(|left, right| {
+            timestamp_sort_key(right.created_at.as_ref())
+                .cmp(&timestamp_sort_key(left.created_at.as_ref()))
+        });
+        jobs.truncate(request.limit.clamp(1, 200) as usize);
+        Ok(Response::new(ListIngestionJobsResponse { jobs }))
+    }
+
+    async fn retry(
+        &self,
+        request: Request<RetryIngestionJobRequest>,
+    ) -> Result<Response<IngestionJob>, Status> {
+        let job = self
+            .jobs
+            .read()
+            .await
+            .get(&request.into_inner().id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("ingestion job not found"))?;
+        self.start(Request::new(StartIngestionRequest {
+            data_source_id: job.data_source_id,
+            ontology_mapping_id: job.ontology_mapping_id,
+            ontology_version_id: job.ontology_version_id,
+        }))
+        .await
+    }
+
+    async fn list_events(
+        &self,
+        request: Request<ListIngestionEventsRequest>,
+    ) -> Result<Response<ListIngestionEventsResponse>, Status> {
+        let request = request.into_inner();
+        let job = self
+            .jobs
+            .read()
+            .await
+            .get(&request.job_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("ingestion job not found"))?;
+        let limit = request.limit.clamp(1, 1_000);
+        let events = if let Some(repository) = &self.control_plane {
+            repository
+                .list_ingestion_events(
+                    parse_uuid(&job.workspace_id, "workspace_id")?,
+                    parse_uuid(&job.id, "job_id")?,
+                    limit,
+                )
+                .await
+                .map_err(storage_status)?
+                .into_iter()
+                .map(proto_ingestion_event)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_status)?
+        } else {
+            self.events
+                .read()
+                .await
+                .get(&job.id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .take(limit as usize)
+                .collect()
+        };
+        Ok(Response::new(ListIngestionEventsResponse { events }))
     }
 }
 
@@ -1714,6 +1929,107 @@ impl GraphService for Runtime {
             object_type: node.object_type,
             properties_json: node.properties_json,
         }))
+    }
+
+    async fn get_object_provenance(
+        &self,
+        request: Request<GetObjectProvenanceRequest>,
+    ) -> Result<Response<GetObjectProvenanceResponse>, Status> {
+        let request = request.into_inner();
+        let version = self
+            .ontology_version(&request.workspace_id, &request.ontology_version_id)
+            .await?;
+        let node = self
+            .graph
+            .get_node(
+                parse_uuid(&request.workspace_id, "workspace_id")?,
+                parse_uuid(&request.ontology_version_id, "ontology_version_id")?,
+                &request.object_type,
+                &request.id,
+            )
+            .await
+            .map_err(storage_status)?;
+        let source_id = node
+            .source_id
+            .ok_or_else(|| Status::failed_precondition("object source is unavailable"))?
+            .to_string();
+        let source = self
+            .data_sources
+            .read()
+            .await
+            .get(&source_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("object data source no longer exists"))?;
+        let property_names = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            &node.properties_json,
+        )
+        .map_err(|error| {
+            Status::internal(format!("stored object properties are invalid: {error}"))
+        })?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<HashSet<_>>();
+        let mappings = self.mappings.read().await;
+        let candidates = mappings
+            .values()
+            .filter(|mapping| {
+                mapping.ontology_id == version.ontology_id && mapping.data_source_id == source_id
+            })
+            .filter_map(|mapping| {
+                let document =
+                    serde_json::from_str::<MappingDocument>(&mapping.mapping_plan_json).ok()?;
+                document
+                    .plans()
+                    .iter()
+                    .any(|plan| plan.object_type == request.object_type)
+                    .then(|| (mapping.clone(), document))
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(Status::not_found("mapping provenance is unavailable"));
+        }
+        let jobs = self.jobs.read().await;
+        let latest_job = jobs
+            .values()
+            .filter(|job| {
+                candidates
+                    .iter()
+                    .any(|candidate| candidate.0.id == job.ontology_mapping_id)
+                    && job.ontology_version_id == version.id
+                    && job.state == IngestionState::Succeeded as i32
+            })
+            .max_by_key(|job| timestamp_sort_key(job.completed_at.as_ref()));
+        let mapping = latest_job
+            .and_then(|job| {
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.0.id == job.ontology_mapping_id)
+            })
+            .unwrap_or(&candidates[0]);
+        let imported_at = latest_job.and_then(|job| job.completed_at.or(job.created_at));
+        let job_id = latest_job.map(|job| job.id.clone()).unwrap_or_default();
+        let plan = mapping
+            .1
+            .plans()
+            .iter()
+            .find(|plan| plan.object_type == request.object_type)
+            .expect("matching mapping plan was selected above");
+        let properties = plan
+            .fields
+            .iter()
+            .filter(|field| property_names.contains(&field.target))
+            .map(|field| PropertyProvenance {
+                property: field.target.clone(),
+                data_source_id: source.id.clone(),
+                data_source_name: source.name.clone(),
+                source_field: field.source.clone(),
+                ontology_mapping_id: mapping.0.id.clone(),
+                ontology_mapping_name: mapping.0.name.clone(),
+                ingestion_job_id: job_id.clone(),
+                imported_at,
+            })
+            .collect();
+        Ok(Response::new(GetObjectProvenanceResponse { properties }))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2598,6 +2914,10 @@ fn timestamp(value: chrono::DateTime<Utc>) -> Timestamp {
     }
 }
 
+fn timestamp_sort_key(value: Option<&Timestamp>) -> (i64, i32) {
+    value.map_or((0, 0), |value| (value.seconds, value.nanos))
+}
+
 fn persistence_revision() -> u64 {
     u64::try_from(Utc::now().timestamp_micros()).unwrap_or_default()
 }
@@ -2774,6 +3094,17 @@ fn stored_job(value: &IngestionJob, revision: u64) -> Result<StoredIngestionJob,
         })?,
         error: value.error.clone(),
         revision,
+        created_at_micros: timestamp_micros(value.created_at.as_ref())?,
+        started_at_micros: value
+            .started_at
+            .as_ref()
+            .map(|value| timestamp_micros(Some(value)))
+            .transpose()?,
+        completed_at_micros: value
+            .completed_at
+            .as_ref()
+            .map(|value| timestamp_micros(Some(value)))
+            .transpose()?,
     })
 }
 
@@ -2791,6 +3122,60 @@ fn proto_job(value: StoredIngestionJob) -> Result<IngestionJob, StorageError> {
         ontology_mapping_id: value.ontology_mapping_id.to_string(),
         ontology_version_id: value.ontology_version_id.to_string(),
         workspace_id: value.workspace_id.to_string(),
+        created_at: Some(proto_timestamp(value.created_at_micros)?),
+        started_at: value.started_at_micros.map(proto_timestamp).transpose()?,
+        completed_at: value.completed_at_micros.map(proto_timestamp).transpose()?,
+    })
+}
+
+fn ingestion_event(
+    job_id: &str,
+    source_id: &str,
+    event_type: &str,
+    row_number: u64,
+    object_type: &str,
+    message: &str,
+    details_json: &str,
+) -> IngestionEvent {
+    IngestionEvent {
+        job_id: job_id.into(),
+        data_source_id: source_id.into(),
+        event_type: event_type.into(),
+        row_number,
+        object_type: object_type.into(),
+        external_id: String::new(),
+        message: message.into(),
+        details_json: details_json.into(),
+        occurred_at: Some(timestamp(Utc::now())),
+    }
+}
+
+fn stored_ingestion_event(value: &IngestionEvent) -> Result<StoredIngestionEvent, Status> {
+    Ok(StoredIngestionEvent {
+        workspace_id: parse_uuid(&dev_workspace_id(), "workspace_id")?,
+        job_id: parse_uuid(&value.job_id, "job_id")?,
+        source_id: parse_uuid(&value.data_source_id, "data_source_id")?,
+        event_type: value.event_type.clone(),
+        row_number: value.row_number,
+        object_type: value.object_type.clone(),
+        external_id: value.external_id.clone(),
+        message: value.message.clone(),
+        details_json: value.details_json.clone(),
+        occurred_at_micros: timestamp_micros(value.occurred_at.as_ref()).map_err(storage_status)?,
+    })
+}
+
+fn proto_ingestion_event(value: StoredIngestionEvent) -> Result<IngestionEvent, StorageError> {
+    Ok(IngestionEvent {
+        job_id: value.job_id.to_string(),
+        data_source_id: value.source_id.to_string(),
+        event_type: value.event_type,
+        row_number: value.row_number,
+        object_type: value.object_type,
+        external_id: value.external_id,
+        message: value.message,
+        details_json: value.details_json,
+        occurred_at: Some(proto_timestamp(value.occurred_at_micros)?),
     })
 }
 
@@ -3427,6 +3812,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exposes_import_history_retry_events_and_property_provenance() {
+        let runtime = Runtime::seeded().await;
+        let (source, mapping, version) = prepare_uploaded_json_scope(&runtime).await;
+        let queued = runtime
+            .start(Request::new(StartIngestionRequest {
+                data_source_id: source.id.clone(),
+                ontology_mapping_id: mapping.id.clone(),
+                ontology_version_id: version.id.clone(),
+            }))
+            .await
+            .expect("ingestion can be queued")
+            .into_inner();
+        let completed = wait_for_job(&runtime, queued).await;
+        assert_eq!(completed.state, IngestionState::Succeeded as i32);
+        assert!(completed.created_at.is_some());
+        assert!(completed.started_at.is_some());
+        assert!(completed.completed_at.is_some());
+
+        let history = IngestionService::list_jobs(
+            &runtime,
+            Request::new(ListIngestionJobsRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_id: mapping.ontology_id.clone(),
+                limit: 20,
+            }),
+        )
+        .await
+        .expect("ontology import history can be listed")
+        .into_inner();
+        assert_eq!(history.jobs.len(), 1);
+        assert_eq!(history.jobs[0].id, completed.id);
+
+        let events = IngestionService::list_events(
+            &runtime,
+            Request::new(ListIngestionEventsRequest {
+                job_id: completed.id.clone(),
+                limit: 20,
+            }),
+        )
+        .await
+        .expect("job events can be listed")
+        .into_inner();
+        assert_eq!(events.events.first().unwrap().event_type, "started");
+        assert_eq!(events.events.last().unwrap().event_type, "completed");
+
+        let provenance = GraphService::get_object_provenance(
+            &runtime,
+            Request::new(GetObjectProvenanceRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version.id.clone(),
+                object_type: "service".into(),
+                id: "service:billing".into(),
+            }),
+        )
+        .await
+        .expect("property provenance can be derived")
+        .into_inner();
+        assert_eq!(provenance.properties.len(), 1);
+        assert_eq!(provenance.properties[0].property, "id");
+        assert_eq!(provenance.properties[0].source_field, "service_id");
+        assert_eq!(provenance.properties[0].data_source_id, source.id);
+        assert_eq!(provenance.properties[0].ingestion_job_id, completed.id);
+
+        let retried = IngestionService::retry(
+            &runtime,
+            Request::new(RetryIngestionJobRequest {
+                id: completed.id.clone(),
+            }),
+        )
+        .await
+        .expect("completed import can be retried")
+        .into_inner();
+        assert_ne!(retried.id, completed.id);
+        let retried = wait_for_job(&runtime, retried).await;
+        assert_eq!(retried.state, IngestionState::Succeeded as i32);
+    }
+
+    #[tokio::test]
     async fn uploaded_parquet_previews_and_runs_through_datafusion() {
         let runtime = Runtime::seeded().await;
         let content = parquet_service_content();
@@ -3476,6 +3939,9 @@ mod tests {
             ontology_mapping_id: mapping.id,
             ontology_version_id: version.id,
             workspace_id: source.workspace_id,
+            created_at: Some(timestamp(Utc::now())),
+            started_at: Some(timestamp(Utc::now())),
+            completed_at: None,
         };
         runtime
             .jobs
@@ -3505,6 +3971,9 @@ mod tests {
             ontology_mapping_id: Uuid::new_v4().to_string(),
             ontology_version_id: Uuid::new_v4().to_string(),
             workspace_id: dev_workspace_id(),
+            created_at: Some(timestamp(Utc::now())),
+            started_at: None,
+            completed_at: None,
         };
         runtime
             .jobs
@@ -3575,6 +4044,9 @@ mod tests {
             ontology_mapping_id: mapping_id.clone(),
             ontology_version_id: version_id.clone(),
             workspace_id: dev_workspace_id(),
+            created_at: Some(timestamp(Utc::now())),
+            started_at: Some(timestamp(Utc::now())),
+            completed_at: None,
         };
         runtime
             .persist_job(&interrupted)

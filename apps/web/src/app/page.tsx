@@ -1,16 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Boxes, Database, DatabaseZap, Orbit, Plus, Workflow } from "lucide-react";
+import { Boxes, Database, DatabaseZap, History, Orbit, Plus, Workflow } from "lucide-react";
 import { DataSourceManager } from "@/components/data-source-manager";
 import { GraphExplorer } from "@/components/graph-explorer";
+import { ImportHistory } from "@/components/import-history";
 import { MappingPanel, parseSource, type BrowserDataSource } from "@/components/mapping-panel";
 import { OntologyEditor } from "@/components/ontology-editor";
 import { emptyGraph, type ImportedGraph } from "@/lib/graph-data";
 import { defaultOntologyCatalog, type OntologyCatalog } from "@/lib/ontology-catalog";
-import { createWorkspaceOntology, downloadWorkspaceSource, expandPersistedGraphNode, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph, previewWorkspaceSource, queryPersistedGraph, type BackendDataSource, type GraphQuerySpec } from "@/lib/context-hub-client";
+import { createWorkspaceOntology, downloadWorkspaceSource, expandPersistedGraphNode, getObjectProvenance, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph, previewWorkspaceSource, queryPersistedGraph, type BackendDataSource, type GraphQuerySpec } from "@/lib/context-hub-client";
 
-type Section = "ontology" | "sources" | "mapping" | "graph";
+type Section = "ontology" | "sources" | "mapping" | "imports" | "graph";
 type OntologyWorkspace = { id: string; name: string; slug: string; activeVersionId: string };
 
 const ontologyRegistryKey = "context-hub.ontology-registry";
@@ -60,6 +61,7 @@ const sections: Array<{ id: Section; label: string; icon: typeof Workflow }> = [
   { id: "ontology", label: "Ontology", icon: Workflow },
   { id: "sources", label: "Data sources", icon: Database },
   { id: "mapping", label: "Data mapping", icon: DatabaseZap },
+  { id: "imports", label: "Imports", icon: History },
   { id: "graph", label: "Explore", icon: Orbit },
 ];
 
@@ -222,6 +224,12 @@ export default function Home() {
     }
   }
 
+  const loadNodeProvenance = useCallback(async (node: ImportedGraph["nodes"][number]) => {
+    const objectType = activeCatalog.objectTypes.find((type) => type.displayName === node.kind || type.apiName === node.kind);
+    if (!objectType || !activeOntology.activeVersionId) return [];
+    return getObjectProvenance(activeOntology.activeVersionId, objectType.apiName, node.id);
+  }, [activeCatalog.objectTypes, activeOntology.activeVersionId]);
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -246,7 +254,12 @@ export default function Home() {
           onUseForMapping={(id) => { void selectDataSource(id); setSection("mapping"); }}
         />}
         {section === "mapping" && <MappingPanel key={`${activeOntology.id}:${activeDataSource?.id ?? "new"}`} ontologyId={activeOntology.id} ontologyName={activeOntology.name} ontologySlug={activeOntology.slug} ontology={activeCatalog} dataSource={activeDataSource} onDataSourceLoaded={registerDataSource} onImport={(imported) => { setGraphs((items) => ({ ...items, [activeOntology.id]: imported })); setSection("graph"); }} />}
-        {section === "graph" && <GraphExplorer graph={activeGraph} ontology={activeCatalog} onOpenMapping={() => setSection("mapping")} onOpenOntology={() => setSection("ontology")} onLoadMore={loadMoreGraph} onRunQuery={runGraphQuery} onExpandNode={expandGraphNode} canLoadMore={!!activeGraph.pagination?.hasMore} loadingMore={loadingMoreGraph} queryBusy={queryingGraph} expandingNodeId={expandingNodeId} />}
+        {section === "imports" && <ImportHistory
+          ontologyId={activeOntology.id}
+          sources={backendDataSources}
+          onUseSource={(id) => { void selectDataSource(id); setSection("mapping"); }}
+        />}
+        {section === "graph" && <GraphExplorer graph={activeGraph} ontology={activeCatalog} onOpenMapping={() => setSection("mapping")} onOpenOntology={() => setSection("ontology")} onLoadMore={loadMoreGraph} onRunQuery={runGraphQuery} onExpandNode={expandGraphNode} onLoadProvenance={loadNodeProvenance} canLoadMore={!!activeGraph.pagination?.hasMore} loadingMore={loadingMoreGraph} queryBusy={queryingGraph} expandingNodeId={expandingNodeId} />}
       </section>
     </main>
   );

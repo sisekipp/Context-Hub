@@ -34,6 +34,13 @@ export type BackendOntology = { id: string; name: string; slug: string; activeVe
 export type BackendOntologyDraft = { id: string; workspaceId: string; name: string; slug: string; revision: number; definitionJson: string; layoutJson: string };
 export type BackendDataSource = { id: string; name: string; fileName: string; kind: "upload" | "rest" | "graphql"; configurationJson: string };
 export type BackendDataSourceUsage = { ontologyId: string; ontologyName: string; mappingId: string; mappingName: string };
+export type BackendIngestionJob = {
+  id: string; dataSourceId: string; state: IngestionState; rowsRead: number; nodesWritten: number;
+  edgesWritten: number; rowsRejected: number; error: string; ontologyMappingId: string;
+  ontologyVersionId: string; createdAt: Date | null; startedAt: Date | null; completedAt: Date | null;
+};
+export type BackendIngestionEvent = { eventType: string; rowNumber: number; objectType: string; externalId: string; message: string; detailsJson: string; occurredAt: Date | null };
+export type BackendPropertyProvenance = { property: string; dataSourceId: string; dataSourceName: string; sourceField: string; ontologyMappingId: string; ontologyMappingName: string; ingestionJobId: string; importedAt: Date | null };
 export type RestKeyValue = { key: string; value: string };
 export type RestSourceInput = {
   id?: string;
@@ -508,12 +515,58 @@ export async function saveOntologyMapping(options: {
 }
 
 export async function startIngestion(dataSourceId: string, mappingId: string, versionId: string) {
-  let job = await ingestions.start({ dataSourceId, ontologyMappingId: mappingId, ontologyVersionId: versionId });
+  const job = await ingestions.start({ dataSourceId, ontologyMappingId: mappingId, ontologyVersionId: versionId });
+  return pollIngestionJob(job);
+}
+
+async function pollIngestionJob(initial: Awaited<ReturnType<typeof ingestions.start>>) {
+  let job = initial;
   for (let attempt = 0; attempt < 300 && (job.state === IngestionState.QUEUED || job.state === IngestionState.RUNNING); attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 100));
     job = await ingestions.getJob({ id: job.id });
   }
   return job;
+}
+
+function protoDate(value: { seconds: bigint; nanos: number } | undefined): Date | null {
+  return value ? new Date(Number(value.seconds) * 1_000 + value.nanos / 1_000_000) : null;
+}
+
+function backendJob(job: Awaited<ReturnType<typeof ingestions.getJob>>): BackendIngestionJob {
+  return {
+    id: job.id, dataSourceId: job.dataSourceId, state: job.state, rowsRead: Number(job.rowsRead),
+    nodesWritten: Number(job.nodesWritten), edgesWritten: Number(job.edgesWritten), rowsRejected: Number(job.rowsRejected),
+    error: job.error, ontologyMappingId: job.ontologyMappingId, ontologyVersionId: job.ontologyVersionId,
+    createdAt: protoDate(job.createdAt), startedAt: protoDate(job.startedAt), completedAt: protoDate(job.completedAt),
+  };
+}
+
+export async function listOntologyIngestionJobs(ontologyId: string): Promise<BackendIngestionJob[]> {
+  const response = await ingestions.listJobs({ workspaceId: DEV_WORKSPACE_ID, ontologyId, limit: 100 });
+  return response.jobs.map(backendJob);
+}
+
+export async function retryIngestionJob(id: string): Promise<BackendIngestionJob> {
+  return backendJob(await pollIngestionJob(await ingestions.retry({ id })));
+}
+
+export async function listIngestionEvents(jobId: string): Promise<BackendIngestionEvent[]> {
+  const response = await ingestions.listEvents({ jobId, limit: 500 });
+  return response.events.map((event) => ({
+    eventType: event.eventType, rowNumber: Number(event.rowNumber), objectType: event.objectType,
+    externalId: event.externalId, message: event.message, detailsJson: event.detailsJson,
+    occurredAt: protoDate(event.occurredAt),
+  }));
+}
+
+export async function getObjectProvenance(ontologyVersionId: string, objectType: string, id: string): Promise<BackendPropertyProvenance[]> {
+  const response = await graph.getObjectProvenance({ workspaceId: DEV_WORKSPACE_ID, ontologyVersionId, objectType, id });
+  return response.properties.map((property) => ({
+    property: property.property, dataSourceId: property.dataSourceId, dataSourceName: property.dataSourceName,
+    sourceField: property.sourceField, ontologyMappingId: property.ontologyMappingId,
+    ontologyMappingName: property.ontologyMappingName, ingestionJobId: property.ingestionJobId,
+    importedAt: protoDate(property.importedAt),
+  }));
 }
 
 const graphColors = ["#7c9cff", "#5ed3b5", "#f7b267", "#c792ea", "#ff7d9d"];

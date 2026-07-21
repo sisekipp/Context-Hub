@@ -234,6 +234,9 @@ message IngestionJob {
   string ontology_mapping_id = 9;
   string ontology_version_id = 10;
   string workspace_id = 11;
+  google.protobuf.Timestamp created_at = 12;
+  google.protobuf.Timestamp started_at = 13;
+  google.protobuf.Timestamp completed_at = 14;
 }
 message StartIngestionRequest {
   string data_source_id = 1;
@@ -241,6 +244,26 @@ message StartIngestionRequest {
   string ontology_version_id = 3;
 }
 message GetIngestionJobRequest { string id = 1; }
+message ListIngestionJobsRequest {
+  string workspace_id = 1;
+  string ontology_id = 2;
+  uint32 limit = 3;
+}
+message ListIngestionJobsResponse { repeated IngestionJob jobs = 1; }
+message RetryIngestionJobRequest { string id = 1; }
+message IngestionEvent {
+  string job_id = 1;
+  string data_source_id = 2;
+  string event_type = 3;
+  uint64 row_number = 4;
+  string object_type = 5;
+  string external_id = 6;
+  string message = 7;
+  string details_json = 8;
+  google.protobuf.Timestamp occurred_at = 9;
+}
+message ListIngestionEventsRequest { string job_id = 1; uint32 limit = 2; }
+message ListIngestionEventsResponse { repeated IngestionEvent events = 1; }
 
 // Internal worker boundary: records have already been validated and transformed by the
 // MappingPlan/DataFusion pipeline before this bounded graph batch is persisted.
@@ -256,6 +279,9 @@ service IngestionService {
   rpc Start(StartIngestionRequest) returns (IngestionJob);
   rpc ImportGraph(ImportGraphRequest) returns (IngestionJob);
   rpc GetJob(GetIngestionJobRequest) returns (IngestionJob);
+  rpc ListJobs(ListIngestionJobsRequest) returns (ListIngestionJobsResponse);
+  rpc Retry(RetryIngestionJobRequest) returns (IngestionJob);
+  rpc ListEvents(ListIngestionEventsRequest) returns (ListIngestionEventsResponse);
 }
 
 enum FilterOperator {
@@ -341,6 +367,23 @@ message GetObjectRequest {
   string object_type = 3;
   string id = 4;
 }
+message GetObjectProvenanceRequest {
+  string workspace_id = 1;
+  string ontology_version_id = 2;
+  string object_type = 3;
+  string id = 4;
+}
+message PropertyProvenance {
+  string property = 1;
+  string data_source_id = 2;
+  string data_source_name = 3;
+  string source_field = 4;
+  string ontology_mapping_id = 5;
+  string ontology_mapping_name = 6;
+  string ingestion_job_id = 7;
+  google.protobuf.Timestamp imported_at = 8;
+}
+message GetObjectProvenanceResponse { repeated PropertyProvenance properties = 1; }
 message ExpandGraphRequest {
   string workspace_id = 1;
   string ontology_version_id = 2;
@@ -354,4 +397,5 @@ service GraphService {
   rpc Query(GraphQuery) returns (QueryGraphResponse);
   rpc GetObject(GetObjectRequest) returns (GraphNode);
   rpc Expand(ExpandGraphRequest) returns (QueryGraphResponse);
+  rpc GetObjectProvenance(GetObjectProvenanceRequest) returns (GetObjectProvenanceResponse);
 }

@@ -76,6 +76,16 @@ pub struct MappedGraphBatch {
     pub rows_rejected: u64,
     pub nodes: Vec<MappedNode>,
     pub edges: Vec<MappedEdge>,
+    pub issues: Vec<MappingIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappingIssue {
+    pub row_number: u64,
+    pub object_type: String,
+    pub field: String,
+    pub strategy: ErrorStrategy,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -411,8 +421,9 @@ pub async fn execute_source_mapping_bundle(
     let mut node_positions = std::collections::HashMap::new();
     let mut pending_edges = Vec::new();
     for plan in plans {
-        let (nodes, rows_rejected, edges) = map_plan_batches(plan, &batches).await?;
+        let (nodes, rows_rejected, edges, issues) = map_plan_batches(plan, &batches).await?;
         result.rows_rejected += rows_rejected;
+        result.issues.extend(issues);
         for node in nodes {
             merge_node(&mut result.nodes, &mut node_positions, node)?;
         }
@@ -449,7 +460,7 @@ fn validate_plan_set(plans: &[MappingPlan]) -> Result<(), MappingError> {
 async fn map_plan_batches(
     plan: &MappingPlan,
     batches: &[RecordBatch],
-) -> Result<(Vec<MappedNode>, u64, Vec<PendingEdge>), MappingError> {
+) -> Result<(Vec<MappedNode>, u64, Vec<PendingEdge>, Vec<MappingIssue>), MappingError> {
     let schema = batches[0].schema();
     let worker_plan = worker_projection(plan);
     let mapped = execute_mapping(&worker_plan, schema, batches.to_vec()).await?;
@@ -457,32 +468,13 @@ async fn map_plan_batches(
     let mut nodes = Vec::new();
     let mut rows_rejected = 0;
     let mut pending_edges = Vec::new();
+    let mut issues = Vec::new();
     for (row_index, row) in rows.into_iter().enumerate() {
         let Some(object) = row.as_object() else {
             rows_rejected += 1;
             continue;
         };
-        let mut reject_row = false;
-        for (field_index, field) in plan.fields.iter().enumerate() {
-            let failed = object
-                .get(&format!("__mapping_error_{field_index}"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            if !failed {
-                continue;
-            }
-            match field.on_error {
-                ErrorStrategy::UseNull => {}
-                ErrorStrategy::RejectRow => reject_row = true,
-                ErrorStrategy::AbortJob => {
-                    return Err(MappingError::FieldTransform {
-                        field: field.target.clone(),
-                        row: row_index + 1,
-                    });
-                }
-            }
-        }
-        if reject_row {
+        if collect_field_issues(plan, object, row_index, &mut issues)? {
             rows_rejected += 1;
             continue;
         }
@@ -492,6 +484,13 @@ async fn map_plan_batches(
         let Some(identity) = identity.filter(|values| values.iter().all(|value| !value.is_null()))
         else {
             rows_rejected += 1;
+            issues.push(MappingIssue {
+                row_number: (row_index + 1) as u64,
+                object_type: plan.object_type.clone(),
+                field: plan.identity_fields.join(","),
+                strategy: ErrorStrategy::RejectRow,
+                message: "identity is null; row was rejected".into(),
+            });
             continue;
         };
         let object_id = stable_object_id(&plan.object_type, &identity);
@@ -546,7 +545,46 @@ async fn map_plan_batches(
             }
         }
     }
-    Ok((nodes, rows_rejected, pending_edges))
+    Ok((nodes, rows_rejected, pending_edges, issues))
+}
+
+fn collect_field_issues(
+    plan: &MappingPlan,
+    object: &serde_json::Map<String, serde_json::Value>,
+    row_index: usize,
+    issues: &mut Vec<MappingIssue>,
+) -> Result<bool, MappingError> {
+    let mut reject_row = false;
+    for (field_index, field) in plan.fields.iter().enumerate() {
+        let failed = object
+            .get(&format!("__mapping_error_{field_index}"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !failed {
+            continue;
+        }
+        let message = match field.on_error {
+            ErrorStrategy::UseNull => "transformation failed; null was used",
+            ErrorStrategy::RejectRow => {
+                reject_row = true;
+                "transformation failed; row was rejected"
+            }
+            ErrorStrategy::AbortJob => {
+                return Err(MappingError::FieldTransform {
+                    field: field.target.clone(),
+                    row: row_index + 1,
+                });
+            }
+        };
+        issues.push(MappingIssue {
+            row_number: (row_index + 1) as u64,
+            object_type: plan.object_type.clone(),
+            field: field.target.clone(),
+            strategy: field.on_error,
+            message: message.into(),
+        });
+    }
+    Ok(reject_row)
 }
 
 fn merge_node(
