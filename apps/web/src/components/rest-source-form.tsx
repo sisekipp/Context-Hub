@@ -58,7 +58,7 @@ function KeyValueEditor({ label, items, onChange }: { label: string; items: Rest
     <div className="rest-pairs-title"><span>{label}</span><button type="button" onClick={() => onChange([...items, emptyPair()])}><Plus size={12}/> Add</button></div>
     {items.map((item, index) => <div className="rest-pair" key={`${label}-${index}`}>
       <input aria-label={`${label} key ${index + 1}`} placeholder="Key" value={item.key} onChange={(event) => onChange(items.map((entry, entryIndex) => entryIndex === index ? { ...entry, key: event.target.value } : entry))}/>
-      <input aria-label={`${label} value ${index + 1}`} placeholder="Value" value={item.value} onChange={(event) => onChange(items.map((entry, entryIndex) => entryIndex === index ? { ...entry, value: event.target.value } : entry))}/>
+      <input type={label === "Headers" && /^(authorization|cookie|proxy-authorization|x-api-key)$/i.test(item.key) ? "password" : "text"} aria-label={`${label} value ${index + 1}`} placeholder="Value" value={item.value} onChange={(event) => onChange(items.map((entry, entryIndex) => entryIndex === index ? { ...entry, value: event.target.value } : entry))}/>
       <button type="button" aria-label={`Remove ${label} ${index + 1}`} onClick={() => onChange(items.filter((_, entryIndex) => entryIndex !== index))}><Trash2 size={12}/></button>
     </div>)}
     {!items.length && <small>No {label.toLowerCase()} configured.</small>}
@@ -123,7 +123,7 @@ export function RestSourceForm({ onClose, onCreated, onSaved, initialValue }: { 
         <label>Max response MiB<input type="number" min={1} max={64} value={Math.round(source.maxBytes / 1024 / 1024)} onChange={(event) => update({ maxBytes: Number(event.target.value) * 1024 * 1024 })}/></label>
       </div>
       <div className="rest-collections"><KeyValueEditor label="Query parameters" items={source.query} onChange={(query) => update({ query })}/><KeyValueEditor label="Headers" items={source.headers} onChange={(headers) => update({ headers })}/></div>
-      <div className="rest-security-note">Private networks, unsafe redirects, oversized responses, and plaintext credential headers are rejected by the backend.</div>
+      <div className="rest-security-note">Private networks, unsafe redirects, and oversized responses are rejected. Authorization, cookies, and API keys are encrypted separately and only shown as masked placeholders.</div>
       {message && <div className="import-status" role="status">{message}</div>}
       <div className="rest-dialog-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{busy ? "Saving…" : editing ? "Save changes" : "Save & preview"}</button></div>
     </form>

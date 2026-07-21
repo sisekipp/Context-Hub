@@ -1,14 +1,17 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
+    path::Path as FsPath,
     sync::Arc,
 };
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use context_hub_domain::OntologyDraft;
+use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, sync::RwLock};
 use uuid::Uuid;
@@ -266,6 +269,16 @@ pub enum StorageError {
     RevisionConflict { expected: u64, current: u64 },
 }
 
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().fold(
+        String::with_capacity(bytes.len() * 2),
+        |mut output, byte| {
+            write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+            output
+        },
+    )
+}
+
 #[async_trait]
 pub trait OntologyRepository: Send + Sync {
     async fn get_draft(&self, id: Uuid) -> Result<OntologyDraft, StorageError>;
@@ -280,6 +293,9 @@ pub trait OntologyRepository: Send + Sync {
 pub trait SourceObjectStore: Send + Sync {
     async fn put(&self, key: &str, content: Vec<u8>) -> Result<(), StorageError>;
     async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError>;
+    async fn download(&self, key: &str, path: &FsPath) -> Result<(u64, String), StorageError>;
+    async fn compose(&self, key: &str, part_keys: &[String])
+    -> Result<(u64, String), StorageError>;
     async fn delete(&self, key: &str) -> Result<(), StorageError>;
 }
 
@@ -331,6 +347,7 @@ pub struct StoredDataSource {
     pub name: String,
     pub kind: i32,
     pub configuration_json: String,
+    pub credential_envelope: String,
     pub revision: u64,
 }
 
@@ -359,6 +376,11 @@ pub struct StoredIngestionJob {
     pub created_at_micros: i64,
     pub started_at_micros: Option<i64>,
     pub completed_at_micros: Option<i64>,
+    pub checkpoint_stage: String,
+    pub checkpoint_nodes: u64,
+    pub checkpoint_edges: u64,
+    pub lease_owner: String,
+    pub lease_expires_at_micros: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,6 +395,91 @@ pub struct StoredIngestionEvent {
     pub message: String,
     pub details_json: String,
     pub occurred_at_micros: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredUploadSession {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub file_name: String,
+    pub format: i32,
+    pub size_bytes: u64,
+    pub part_size_bytes: u64,
+    pub state: i32,
+    pub revision: u64,
+    pub created_at_micros: i64,
+    pub expires_at_micros: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredUploadPart {
+    pub upload_id: Uuid,
+    pub workspace_id: Uuid,
+    pub part_number: u32,
+    pub object_key: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub revision: u64,
+    pub uploaded_at_micros: i64,
+}
+
+#[derive(Debug, Deserialize, clickhouse::Row)]
+struct UploadSessionRow {
+    id: String,
+    workspace_id: String,
+    name: String,
+    file_name: String,
+    format: i32,
+    size_bytes: u64,
+    part_size_bytes: u64,
+    state: i32,
+    revision: u64,
+    created_at_micros: i64,
+    expires_at_micros: i64,
+}
+
+#[derive(Debug, Deserialize, clickhouse::Row)]
+struct IngestionJobRow {
+    id: String,
+    workspace_id: String,
+    data_source_id: String,
+    ontology_mapping_id: String,
+    ontology_version_id: String,
+    state: i32,
+    stats_json: String,
+    error: String,
+    revision: u64,
+    created_at_micros: i64,
+    started_at_micros: Option<i64>,
+    completed_at_micros: Option<i64>,
+    checkpoint_stage: String,
+    checkpoint_nodes: u64,
+    checkpoint_edges: u64,
+    lease_owner: String,
+    lease_expires_at_micros: Option<i64>,
+}
+
+fn stored_ingestion_job(row: IngestionJobRow) -> Result<StoredIngestionJob, StorageError> {
+    Ok(StoredIngestionJob {
+        id: parse_uuid(&row.id, "job id")?,
+        workspace_id: parse_uuid(&row.workspace_id, "workspace id")?,
+        data_source_id: parse_uuid(&row.data_source_id, "source id")?,
+        ontology_mapping_id: parse_uuid(&row.ontology_mapping_id, "mapping id")?,
+        ontology_version_id: parse_uuid(&row.ontology_version_id, "version id")?,
+        state: row.state,
+        stats_json: row.stats_json,
+        error: row.error,
+        revision: row.revision,
+        created_at_micros: row.created_at_micros,
+        started_at_micros: row.started_at_micros,
+        completed_at_micros: row.completed_at_micros,
+        checkpoint_stage: row.checkpoint_stage,
+        checkpoint_nodes: row.checkpoint_nodes,
+        checkpoint_edges: row.checkpoint_edges,
+        lease_owner: row.lease_owner,
+        lease_expires_at_micros: row.lease_expires_at_micros,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,6 +534,7 @@ pub trait ControlPlaneRepository: Send + Sync {
     async fn delete_data_source(&self, value: &StoredDataSource) -> Result<(), StorageError>;
     async fn save_mapping(&self, value: &StoredOntologyMapping) -> Result<(), StorageError>;
     async fn save_job(&self, value: &StoredIngestionJob) -> Result<(), StorageError>;
+    async fn get_job(&self, id: Uuid) -> Result<StoredIngestionJob, StorageError>;
     async fn append_ingestion_events(
         &self,
         values: &[StoredIngestionEvent],
@@ -437,6 +545,14 @@ pub trait ControlPlaneRepository: Send + Sync {
         job_id: Uuid,
         limit: u32,
     ) -> Result<Vec<StoredIngestionEvent>, StorageError>;
+    async fn save_upload_session(&self, value: &StoredUploadSession) -> Result<(), StorageError>;
+    async fn get_upload_session(&self, id: Uuid) -> Result<StoredUploadSession, StorageError>;
+    async fn save_upload_part(&self, value: &StoredUploadPart) -> Result<(), StorageError>;
+    async fn list_upload_parts(
+        &self,
+        workspace_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<Vec<StoredUploadPart>, StorageError>;
     async fn save_function_artifact(
         &self,
         value: &StoredFunctionArtifact,
@@ -539,8 +655,8 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
                 })
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
-        let source_rows = self.client.query("SELECT toString(id), toString(workspace_id), name, toInt32(kind), configuration_json, revision FROM data_sources FINAL WHERE workspace_id = ? AND deleted = false")
-            .bind(&workspace).fetch_all::<(String, String, String, i32, String, u64)>().await?;
+        let source_rows = self.client.query("SELECT toString(id), toString(workspace_id), name, toInt32(kind), configuration_json, credential_envelope, revision FROM data_sources FINAL WHERE workspace_id = ? AND deleted = false")
+            .bind(&workspace).fetch_all::<(String, String, String, i32, String, String, u64)>().await?;
         let data_sources = source_rows
             .into_iter()
             .map(|row| {
@@ -550,7 +666,8 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
                     name: row.2,
                     kind: row.3,
                     configuration_json: row.4,
-                    revision: row.5,
+                    credential_envelope: row.5,
+                    revision: row.6,
                 })
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
@@ -570,32 +687,11 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
                 })
             })
             .collect::<Result<Vec<_>, StorageError>>()?;
-        let job_times = self.client.query("SELECT toString(id), toUnixTimestamp64Micro(created_at), toUnixTimestamp64Micro(started_at), toUnixTimestamp64Micro(completed_at) FROM ingestion_jobs FINAL WHERE workspace_id = ?")
-            .bind(&workspace).fetch_all::<(String, i64, Option<i64>, Option<i64>)>().await?.into_iter()
-            .map(|row| (row.0, (row.1, row.2, row.3))).collect::<HashMap<_, _>>();
-        let job_rows = self.client.query("SELECT toString(id), toString(workspace_id), toString(data_source_id), toString(ontology_mapping_id), toString(ontology_version_id), toInt32(state), stats_json, error, revision FROM ingestion_jobs FINAL WHERE workspace_id = ?")
-            .bind(&workspace).fetch_all::<(String, String, String, String, String, i32, String, String, u64)>().await?;
+        let job_rows = self.client.query("SELECT toString(id) AS id, toString(workspace_id) AS workspace_id, toString(data_source_id) AS data_source_id, toString(ontology_mapping_id) AS ontology_mapping_id, toString(ontology_version_id) AS ontology_version_id, toInt32(state) AS state, stats_json, error, revision, toUnixTimestamp64Micro(created_at) AS created_at_micros, toUnixTimestamp64Micro(started_at) AS started_at_micros, toUnixTimestamp64Micro(completed_at) AS completed_at_micros, checkpoint_stage, checkpoint_nodes, checkpoint_edges, lease_owner, toUnixTimestamp64Micro(lease_expires_at) AS lease_expires_at_micros FROM ingestion_jobs FINAL WHERE workspace_id = ?")
+            .bind(&workspace).fetch_all::<IngestionJobRow>().await?;
         let jobs = job_rows
             .into_iter()
-            .map(|row| {
-                let times = job_times.get(&row.0).copied().ok_or_else(|| {
-                    StorageError::InvalidRecord("ingestion job timestamps are missing".into())
-                })?;
-                Ok(StoredIngestionJob {
-                    id: parse_uuid(&row.0, "job id")?,
-                    workspace_id: parse_uuid(&row.1, "workspace id")?,
-                    data_source_id: parse_uuid(&row.2, "data source id")?,
-                    ontology_mapping_id: parse_uuid(&row.3, "mapping id")?,
-                    ontology_version_id: parse_uuid(&row.4, "version id")?,
-                    state: row.5,
-                    stats_json: row.6,
-                    error: row.7,
-                    revision: row.8,
-                    created_at_micros: times.0,
-                    started_at_micros: times.1,
-                    completed_at_micros: times.2,
-                })
-            })
+            .map(stored_ingestion_job)
             .collect::<Result<Vec<_>, StorageError>>()?;
         Ok(ControlPlaneSnapshot {
             ontologies,
@@ -631,7 +727,7 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
                 )));
             }
         };
-        self.insert_json("INSERT INTO data_sources (id, workspace_id, name, kind, configuration_json, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "name": value.name, "kind": kind, "configuration_json": value.configuration_json, "revision": value.revision, "deleted": false })).await
+        self.insert_json("INSERT INTO data_sources (id, workspace_id, name, kind, configuration_json, credential_envelope, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "name": value.name, "kind": kind, "configuration_json": value.configuration_json, "credential_envelope": value.credential_envelope, "revision": value.revision, "deleted": false })).await
     }
 
     async fn delete_data_source(&self, value: &StoredDataSource) -> Result<(), StorageError> {
@@ -646,7 +742,7 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
                 )));
             }
         };
-        self.insert_json("INSERT INTO data_sources (id, workspace_id, name, kind, configuration_json, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "name": value.name, "kind": kind, "configuration_json": value.configuration_json, "revision": value.revision, "deleted": true })).await
+        self.insert_json("INSERT INTO data_sources (id, workspace_id, name, kind, configuration_json, credential_envelope, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "name": value.name, "kind": kind, "configuration_json": value.configuration_json, "credential_envelope": value.credential_envelope, "revision": value.revision, "deleted": true })).await
     }
 
     async fn save_mapping(&self, value: &StoredOntologyMapping) -> Result<(), StorageError> {
@@ -674,7 +770,16 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
                     .to_string(),
             )
         };
-        self.insert_json("INSERT INTO ingestion_jobs (id, workspace_id, data_source_id, ontology_mapping_id, ontology_version_id, state, stats_json, error, revision, created_at, started_at, completed_at) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "data_source_id": value.data_source_id, "ontology_mapping_id": value.ontology_mapping_id, "ontology_version_id": value.ontology_version_id, "state": state, "stats_json": value.stats_json, "error": value.error, "revision": value.revision, "created_at": timestamp(value.created_at_micros)?, "started_at": value.started_at_micros.map(timestamp).transpose()?, "completed_at": value.completed_at_micros.map(timestamp).transpose()? })).await
+        self.insert_json("INSERT INTO ingestion_jobs (id, workspace_id, data_source_id, ontology_mapping_id, ontology_version_id, state, stats_json, error, revision, created_at, started_at, completed_at, checkpoint_stage, checkpoint_nodes, checkpoint_edges, lease_owner, lease_expires_at) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "data_source_id": value.data_source_id, "ontology_mapping_id": value.ontology_mapping_id, "ontology_version_id": value.ontology_version_id, "state": state, "stats_json": value.stats_json, "error": value.error, "revision": value.revision, "created_at": timestamp(value.created_at_micros)?, "started_at": value.started_at_micros.map(timestamp).transpose()?, "completed_at": value.completed_at_micros.map(timestamp).transpose()?, "checkpoint_stage": value.checkpoint_stage, "checkpoint_nodes": value.checkpoint_nodes, "checkpoint_edges": value.checkpoint_edges, "lease_owner": value.lease_owner, "lease_expires_at": value.lease_expires_at_micros.map(timestamp).transpose()? })).await
+    }
+
+    async fn get_job(&self, id: Uuid) -> Result<StoredIngestionJob, StorageError> {
+        let row = self.client.query("SELECT toString(id) AS id, toString(workspace_id) AS workspace_id, toString(data_source_id) AS data_source_id, toString(ontology_mapping_id) AS ontology_mapping_id, toString(ontology_version_id) AS ontology_version_id, toInt32(state) AS state, stats_json, error, revision, toUnixTimestamp64Micro(created_at) AS created_at_micros, toUnixTimestamp64Micro(started_at) AS started_at_micros, toUnixTimestamp64Micro(completed_at) AS completed_at_micros, checkpoint_stage, checkpoint_nodes, checkpoint_edges, lease_owner, toUnixTimestamp64Micro(lease_expires_at) AS lease_expires_at_micros FROM ingestion_jobs FINAL WHERE id = ? LIMIT 1")
+            .bind(id.to_string())
+            .fetch_optional::<IngestionJobRow>()
+            .await?
+            .ok_or_else(|| StorageError::InvalidRecord(format!("ingestion job {id} does not exist")))?;
+        stored_ingestion_job(row)
     }
 
     async fn append_ingestion_events(
@@ -717,6 +822,79 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
             .fetch_all::<(String, String, u64, String, String, String, String, i64)>().await?
             .into_iter().map(|row| Ok(StoredIngestionEvent {
                 workspace_id, job_id, source_id: parse_uuid(&row.0, "source id")?, event_type: row.1, row_number: row.2, object_type: row.3, external_id: row.4, message: row.5, details_json: row.6, occurred_at_micros: row.7,
+            })).collect()
+    }
+
+    async fn save_upload_session(&self, value: &StoredUploadSession) -> Result<(), StorageError> {
+        let format = match value.format {
+            1 => "json",
+            2 => "ndjson",
+            3 => "csv",
+            4 => "parquet",
+            _ => {
+                return Err(StorageError::InvalidRecord(
+                    "unsupported upload format".into(),
+                ));
+            }
+        };
+        let state = match value.state {
+            1 => "active",
+            2 => "completed",
+            3 => "aborted",
+            _ => {
+                return Err(StorageError::InvalidRecord(
+                    "unsupported upload state".into(),
+                ));
+            }
+        };
+        self.insert_json("INSERT INTO upload_sessions (id, workspace_id, name, file_name, format, size_bytes, part_size_bytes, state, revision, created_at, expires_at) FORMAT JSONEachRow", serde_json::json!({
+            "id": value.id, "workspace_id": value.workspace_id, "name": value.name,
+            "file_name": value.file_name, "format": format, "size_bytes": value.size_bytes,
+            "part_size_bytes": value.part_size_bytes, "state": state, "revision": value.revision,
+            "created_at": timestamp_from_micros(value.created_at_micros)?.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+            "expires_at": timestamp_from_micros(value.expires_at_micros)?.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+        })).await
+    }
+
+    async fn get_upload_session(&self, id: Uuid) -> Result<StoredUploadSession, StorageError> {
+        let row = self.client.query("SELECT toString(id) AS id, toString(workspace_id) AS workspace_id, name, file_name, toInt32(format) AS format, size_bytes, part_size_bytes, toInt32(state) AS state, revision, toUnixTimestamp64Micro(created_at) AS created_at_micros, toUnixTimestamp64Micro(expires_at) AS expires_at_micros FROM upload_sessions FINAL WHERE id = ? LIMIT 1")
+            .bind(id.to_string()).fetch_optional::<UploadSessionRow>().await?
+            .ok_or(StorageError::NotFound)?;
+        Ok(StoredUploadSession {
+            id: parse_uuid(&row.id, "upload session id")?,
+            workspace_id: parse_uuid(&row.workspace_id, "workspace id")?,
+            name: row.name,
+            file_name: row.file_name,
+            format: row.format,
+            size_bytes: row.size_bytes,
+            part_size_bytes: row.part_size_bytes,
+            state: row.state,
+            revision: row.revision,
+            created_at_micros: row.created_at_micros,
+            expires_at_micros: row.expires_at_micros,
+        })
+    }
+
+    async fn save_upload_part(&self, value: &StoredUploadPart) -> Result<(), StorageError> {
+        self.insert_json("INSERT INTO upload_parts (upload_id, workspace_id, part_number, object_key, size_bytes, sha256, revision, uploaded_at) FORMAT JSONEachRow", serde_json::json!({
+            "upload_id": value.upload_id, "workspace_id": value.workspace_id,
+            "part_number": value.part_number, "object_key": value.object_key,
+            "size_bytes": value.size_bytes, "sha256": value.sha256, "revision": value.revision,
+            "uploaded_at": timestamp_from_micros(value.uploaded_at_micros)?.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+        })).await
+    }
+
+    async fn list_upload_parts(
+        &self,
+        workspace_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<Vec<StoredUploadPart>, StorageError> {
+        self.client.query("SELECT part_number, object_key, size_bytes, toString(sha256), revision, toUnixTimestamp64Micro(uploaded_at) FROM upload_parts FINAL WHERE workspace_id = ? AND upload_id = ? ORDER BY part_number")
+            .bind(workspace_id.to_string()).bind(upload_id.to_string())
+            .fetch_all::<(u32, String, u64, String, u64, i64)>().await?
+            .into_iter().map(|row| Ok(StoredUploadPart {
+                upload_id, workspace_id, part_number: row.0, object_key: row.1,
+                size_bytes: row.2, sha256: row.3, revision: row.4, uploaded_at_micros: row.5,
             })).collect()
     }
 
@@ -864,6 +1042,51 @@ impl SourceObjectStore for ObjectStoreSourceRepository {
             .to_vec())
     }
 
+    async fn download(&self, key: &str, path: &FsPath) -> Result<(u64, String), StorageError> {
+        let mut stream = self.store.get(&Path::from(key)).await?.into_stream();
+        let mut file = tokio::fs::File::create(path).await?;
+        let mut checksum = Sha256::new();
+        let mut size_bytes = 0_u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            checksum.update(&chunk);
+            size_bytes = size_bytes
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| StorageError::InvalidRecord("download size overflow".into()))?;
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        Ok((size_bytes, hex_bytes(&checksum.finalize())))
+    }
+
+    async fn compose(
+        &self,
+        key: &str,
+        part_keys: &[String],
+    ) -> Result<(u64, String), StorageError> {
+        let mut upload = self.store.put_multipart(&Path::from(key)).await?;
+        let mut checksum = Sha256::new();
+        let mut size_bytes = 0_u64;
+        for part_key in part_keys {
+            let content = self
+                .store
+                .get(&Path::from(part_key.as_str()))
+                .await?
+                .bytes()
+                .await?;
+            checksum.update(&content);
+            size_bytes = size_bytes
+                .checked_add(content.len() as u64)
+                .ok_or_else(|| StorageError::InvalidRecord("upload size overflow".into()))?;
+            if let Err(error) = upload.put_part(PutPayload::from(content)).await {
+                let _ = upload.abort().await;
+                return Err(error.into());
+            }
+        }
+        upload.complete().await?;
+        Ok((size_bytes, hex_bytes(&checksum.finalize())))
+    }
+
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
         self.store.delete(&Path::from(key)).await?;
         Ok(())
@@ -889,6 +1112,34 @@ impl SourceObjectStore for MemorySourceObjectStore {
             .get(key)
             .cloned()
             .ok_or(StorageError::NotFound)
+    }
+
+    async fn download(&self, key: &str, path: &FsPath) -> Result<(u64, String), StorageError> {
+        let objects = self.objects.read().await;
+        let content = objects.get(key).ok_or(StorageError::NotFound)?;
+        let mut file = tokio::fs::File::create(path).await?;
+        file.write_all(content).await?;
+        file.flush().await?;
+        Ok((content.len() as u64, hex_bytes(&Sha256::digest(content))))
+    }
+
+    async fn compose(
+        &self,
+        key: &str,
+        part_keys: &[String],
+    ) -> Result<(u64, String), StorageError> {
+        let objects = self.objects.read().await;
+        let mut content = Vec::new();
+        let mut checksum = Sha256::new();
+        for part_key in part_keys {
+            let part = objects.get(part_key).ok_or(StorageError::NotFound)?;
+            checksum.update(part);
+            content.extend_from_slice(part);
+        }
+        let size_bytes = content.len() as u64;
+        drop(objects);
+        self.objects.write().await.insert(key.to_owned(), content);
+        Ok((size_bytes, hex_bytes(&checksum.finalize())))
     }
 
     async fn delete(&self, key: &str) -> Result<(), StorageError> {

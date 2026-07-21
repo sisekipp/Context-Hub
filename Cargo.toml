@@ -18,6 +18,7 @@ rust-version = "1.89"
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 axum = "0.8.8"
+base64 = "0.22.1"
 bytes = "1.11.1"
 chrono = { version = "0.4.43", features = ["serde"] }
 clickhouse = { version = "0.15", features = ["inserter", "rustls-tls-native-roots"] }
@@ -28,11 +29,13 @@ parquet = { version = "58.3.0", features = ["arrow"] }
 prost = "0.14.3"
 prost-types = "0.14.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "stream"] }
+ring = "0.17.14"
 schemars = { version = "1.2.1", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
 thiserror = "2.0.18"
+tempfile = "3.23.0"
 tokio = { version = "1.49.0", features = ["full"] }
 tonic = { version = "0.14.2", features = ["tls-native-roots"] }
 tonic-prost = "0.14.2"

@@ -1,8 +1,8 @@
 # Parquet imports
 
-Parquet files use `SOURCE_FILE_FORMAT_PARQUET` and the same workspace-level upload source as JSON, NDJSON, and CSV. The current unary development upload limit remains 32 MiB.
+Parquet files use `SOURCE_FILE_FORMAT_PARQUET` and the same workspace-level upload source as JSON, NDJSON, and CSV. Files up to 32 MiB use the unary RPC; larger files automatically use resumable 8 MiB multipart parts.
 
-After upload, `DataSourceService.Preview` reads the Parquet schema through Arrow and returns at most 10,000 normalized JSON records to the visual mapping assistant. Boolean and numeric columns retain their value types. The preview conversion is a UI boundary only: an ingestion job reads the original Parquet object from MinIO into Arrow `RecordBatch` values and executes the saved DataFusion mapping without converting the source through JSON.
+After upload, `DataSourceService.Preview` streams the Parquet object to temporary storage, reads its schema through Arrow, and returns at most 10,000 normalized JSON records to the visual mapping assistant. Boolean and numeric columns retain their value types. Ingestion processes the original Parquet file in 8,192-row Arrow batches and never converts it through JSON.
 
 Invalid Parquet files are rejected before they are stored as data sources. Stored objects retain the same size and SHA-256 verification used by the other upload formats.
 

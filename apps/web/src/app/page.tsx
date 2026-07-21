@@ -9,7 +9,7 @@ import { MappingPanel, parseSource, type BrowserDataSource } from "@/components/
 import { OntologyEditor } from "@/components/ontology-editor";
 import { emptyGraph, type ImportedGraph } from "@/lib/graph-data";
 import { defaultOntologyCatalog, type OntologyCatalog } from "@/lib/ontology-catalog";
-import { createWorkspaceOntology, downloadWorkspaceSource, expandPersistedGraphNode, getObjectProvenance, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph, previewWorkspaceSource, queryPersistedGraph, type BackendDataSource, type GraphQuerySpec } from "@/lib/context-hub-client";
+import { createWorkspaceOntology, expandPersistedGraphNode, getObjectProvenance, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph, previewWorkspaceSource, queryPersistedGraph, type BackendDataSource, type GraphQuerySpec } from "@/lib/context-hub-client";
 
 type Section = "ontology" | "sources" | "mapping" | "imports" | "graph";
 type OntologyWorkspace = { id: string; name: string; slug: string; activeVersionId: string };
@@ -174,7 +174,7 @@ export default function Home() {
       return;
     }
     try {
-      const content = existing?.kind === "upload" && !/\.parquet$/i.test(existing.fileName) ? await downloadWorkspaceSource(id) : await previewWorkspaceSource(id);
+      const content = await previewWorkspaceSource(id);
       const hydrated: BrowserDataSource = {
         id: content.id,
         fileName: content.fileName,

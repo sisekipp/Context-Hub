@@ -44,4 +44,4 @@ Cursor pagination uses this alternative:
 
 The connector only performs GET requests. It rejects URL credentials, localhost, private, link-local and reserved IP ranges, mixed public/private DNS answers, cross-host redirects, HTTPS downgrades, and responses outside the configured limits. Redirects are resolved and validated one step at a time. DNS answers are checked and pinned into the request client to limit DNS-rebinding exposure.
 
-`Authorization`, `Cookie`, `Proxy-Authorization`, and `X-API-Key` cannot be stored in `configuration_json`. They remain disabled until encrypted credential envelopes are implemented.
+`Authorization`, `Cookie`, `Proxy-Authorization`, and `X-API-Key` values are replaced with masked placeholders in `configuration_json`. Their values are stored in a separate AES-256-GCM credential envelope and are decrypted only for the outbound connector request. Editing a source with an unchanged placeholder preserves the existing secret; deleting the header deletes the secret.

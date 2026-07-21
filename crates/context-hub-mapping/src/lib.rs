@@ -1,4 +1,9 @@
-use std::{io::Cursor, sync::Arc};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Cursor, Read, Write},
+    path::Path,
+    sync::Arc,
+};
 
 use datafusion::{
     arrow::{
@@ -216,6 +221,8 @@ pub enum MappingError {
     Parquet(#[from] parquet::errors::ParquetError),
     #[error("source JSON is invalid: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("source file I/O failed: {0}")]
+    Io(#[from] std::io::Error),
     #[error("source must contain object records")]
     InvalidSource,
     #[error("link '{link_type}' targets missing object '{target_id}'")]
@@ -410,24 +417,87 @@ pub async fn execute_source_mapping_bundle(
 ) -> Result<MappedGraphBatch, MappingError> {
     validate_plan_set(plans)?;
     let batches = read_source_batches(format, content)?;
-    let rows_read = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-    if batches.is_empty() {
-        return Ok(MappedGraphBatch::default());
+    map_batch_stream(plans, batches.into_iter().map(Ok)).await
+}
+
+/// Streams a local source through Arrow record batches instead of retaining the complete file.
+/// JSON arrays are normalized to a temporary NDJSON stream before Arrow schema inference.
+///
+/// # Errors
+///
+/// Returns [`MappingError`] when the file cannot be decoded or the mapping fails.
+pub async fn execute_source_mapping_bundle_path(
+    plans: &[MappingPlan],
+    format: SourceFormat,
+    path: &Path,
+) -> Result<MappedGraphBatch, MappingError> {
+    validate_plan_set(plans)?;
+    match format {
+        SourceFormat::Json => {
+            let normalized = normalize_json_path(path)?;
+            let mut inference = BufReader::new(File::open(normalized.path())?);
+            let (schema, _) = infer_json_schema(&mut inference, None)?;
+            let reader = JsonReaderBuilder::new(Arc::new(schema))
+                .with_batch_size(8_192)
+                .build(BufReader::new(File::open(normalized.path())?))?;
+            map_batch_stream(plans, reader.map(|batch| batch.map_err(Into::into))).await
+        }
+        SourceFormat::Ndjson => {
+            let mut inference = BufReader::new(File::open(path)?);
+            let (schema, _) = infer_json_schema(&mut inference, None)?;
+            let reader = JsonReaderBuilder::new(Arc::new(schema))
+                .with_batch_size(8_192)
+                .build(BufReader::new(File::open(path)?))?;
+            map_batch_stream(plans, reader.map(|batch| batch.map_err(Into::into))).await
+        }
+        SourceFormat::Csv => {
+            let format = CsvFormat::default().with_header(true);
+            let mut inference = BufReader::new(File::open(path)?);
+            let (schema, _) = format.infer_schema(&mut inference, Some(1_000))?;
+            let reader = CsvReaderBuilder::new(Arc::new(schema))
+                .with_format(format)
+                .with_batch_size(8_192)
+                .build(BufReader::new(File::open(path)?))?;
+            map_batch_stream(plans, reader.map(|batch| batch.map_err(Into::into))).await
+        }
+        SourceFormat::Parquet => {
+            let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?
+                .with_batch_size(8_192)
+                .build()?;
+            map_batch_stream(plans, reader.map(|batch| batch.map_err(Into::into))).await
+        }
     }
+}
+
+async fn map_batch_stream<I>(
+    plans: &[MappingPlan],
+    batches: I,
+) -> Result<MappedGraphBatch, MappingError>
+where
+    I: IntoIterator<Item = Result<RecordBatch, MappingError>>,
+{
     let mut result = MappedGraphBatch {
-        rows_read: rows_read as u64,
         ..MappedGraphBatch::default()
     };
     let mut node_positions = std::collections::HashMap::new();
     let mut pending_edges = Vec::new();
-    for plan in plans {
-        let (nodes, rows_rejected, edges, issues) = map_plan_batches(plan, &batches).await?;
-        result.rows_rejected += rows_rejected;
-        result.issues.extend(issues);
-        for node in nodes {
-            merge_node(&mut result.nodes, &mut node_positions, node)?;
+    for batch in batches {
+        let batch = batch?;
+        let row_offset = result.rows_read;
+        result.rows_read += u64::try_from(batch.num_rows()).unwrap_or(u64::MAX);
+        for plan in plans {
+            let (nodes, rows_rejected, edges, mut issues) =
+                map_plan_batches(plan, std::slice::from_ref(&batch)).await?;
+            for issue in &mut issues {
+                issue.row_number += row_offset;
+            }
+            result.rows_rejected += rows_rejected;
+            result.issues.extend(issues);
+            for node in nodes {
+                merge_node(&mut result.nodes, &mut node_positions, node)?;
+            }
+            pending_edges.extend(edges);
         }
-        pending_edges.extend(edges);
     }
     resolve_pending_edges(&mut result, pending_edges)?;
     let mut edge_keys = std::collections::HashSet::new();
@@ -441,6 +511,87 @@ pub async fn execute_source_mapping_bundle(
         ))
     });
     Ok(result)
+}
+
+fn normalize_json_path(path: &Path) -> Result<tempfile::NamedTempFile, MappingError> {
+    let mut output = tempfile::NamedTempFile::new()?;
+    {
+        let mut writer = BufWriter::new(output.as_file_mut());
+        let mut prefix = Vec::new();
+        let mut record = Vec::new();
+        let mut array_started = false;
+        let mut depth = 0_u64;
+        let mut in_string = false;
+        let mut escaped = false;
+        for byte in BufReader::new(File::open(path)?).bytes() {
+            let byte = byte?;
+            if !array_started {
+                prefix.push(byte);
+                if byte == b'[' && !in_string {
+                    array_started = true;
+                    prefix.clear();
+                } else if byte == b'"' && !escaped {
+                    in_string = !in_string;
+                }
+                escaped = in_string && byte == b'\\' && !escaped;
+                if byte != b'\\' {
+                    escaped = false;
+                }
+                continue;
+            }
+            if record.is_empty() {
+                if byte.is_ascii_whitespace() || byte == b',' {
+                    continue;
+                }
+                if byte == b']' {
+                    break;
+                }
+                if byte != b'{' {
+                    return Err(MappingError::InvalidSource);
+                }
+                depth = 1;
+                in_string = false;
+                escaped = false;
+                record.push(byte);
+                continue;
+            }
+            record.push(byte);
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' => in_string = true,
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if depth == 0 {
+                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&record)?;
+                writer.write_all(&record)?;
+                writer.write_all(b"\n")?;
+                record.clear();
+            }
+        }
+        if !array_started {
+            let value: serde_json::Value = serde_json::from_slice(&prefix)?;
+            if !value.is_object() {
+                return Err(MappingError::InvalidSource);
+            }
+            serde_json::to_writer(&mut writer, &value)?;
+            writer.write_all(b"\n")?;
+        } else if !record.is_empty() {
+            return Err(MappingError::InvalidSource);
+        }
+        writer.flush()?;
+    }
+    Ok(output)
 }
 
 fn validate_plan_set(plans: &[MappingPlan]) -> Result<(), MappingError> {
@@ -733,6 +884,65 @@ pub fn preview_source_records(
     Ok(records)
 }
 
+/// Reads only enough streamed Arrow batches to satisfy a bounded preview.
+///
+/// # Errors
+///
+/// Returns [`MappingError`] when the source cannot be decoded.
+pub fn preview_source_records_path(
+    format: SourceFormat,
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, MappingError> {
+    match format {
+        SourceFormat::Json => {
+            let normalized = normalize_json_path(path)?;
+            preview_json_path(normalized.path(), limit)
+        }
+        SourceFormat::Ndjson => preview_json_path(path, limit),
+        SourceFormat::Csv => {
+            let format = CsvFormat::default().with_header(true);
+            let mut inference = BufReader::new(File::open(path)?);
+            let (schema, _) = format.infer_schema(&mut inference, Some(1_000))?;
+            let reader = CsvReaderBuilder::new(Arc::new(schema))
+                .with_format(format)
+                .with_batch_size(limit.clamp(1, 8_192))
+                .build(BufReader::new(File::open(path)?))?;
+            preview_batch_stream(reader.map(|batch| batch.map_err(Into::into)), limit)
+        }
+        SourceFormat::Parquet => {
+            let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?
+                .with_batch_size(limit.clamp(1, 8_192))
+                .build()?;
+            preview_batch_stream(reader.map(|batch| batch.map_err(Into::into)), limit)
+        }
+    }
+}
+
+fn preview_json_path(path: &Path, limit: usize) -> Result<Vec<serde_json::Value>, MappingError> {
+    let mut inference = BufReader::new(File::open(path)?);
+    let (schema, _) = infer_json_schema(&mut inference, Some(1_000))?;
+    let reader = JsonReaderBuilder::new(Arc::new(schema))
+        .with_batch_size(limit.clamp(1, 8_192))
+        .build(BufReader::new(File::open(path)?))?;
+    preview_batch_stream(reader.map(|batch| batch.map_err(Into::into)), limit)
+}
+
+fn preview_batch_stream<I>(batches: I, limit: usize) -> Result<Vec<serde_json::Value>, MappingError>
+where
+    I: IntoIterator<Item = Result<RecordBatch, MappingError>>,
+{
+    let mut records = Vec::new();
+    for batch in batches {
+        records.extend(record_batches_to_json(&[batch?])?);
+        if records.len() >= limit {
+            records.truncate(limit);
+            break;
+        }
+    }
+    Ok(records)
+}
+
 fn normalize_json_records(content: &[u8]) -> Result<Vec<u8>, MappingError> {
     let value: serde_json::Value = serde_json::from_slice(content)?;
     let records = match value {
@@ -1003,6 +1213,54 @@ mod tests {
         assert_eq!(mapped.nodes.len(), 2);
         assert_eq!(mapped.nodes[0].object_id, "service:billing");
         assert!(mapped.nodes[0].properties_json.contains("Billing API"));
+    }
+
+    #[tokio::test]
+    async fn streams_json_arrays_across_arrow_batches() {
+        let mut source = tempfile::NamedTempFile::new().unwrap();
+        source.write_all(b"[").unwrap();
+        for index in 0..9_000 {
+            if index > 0 {
+                source.write_all(b",").unwrap();
+            }
+            write!(
+                source,
+                "{{\"id\":\"service-{index}\",\"name\":\"Service {index}\"}}"
+            )
+            .unwrap();
+        }
+        source.write_all(b"]").unwrap();
+        source.flush().unwrap();
+        let plan = MappingPlan {
+            id: Uuid::new_v4(),
+            object_type: "service".into(),
+            identity_fields: vec!["id".into()],
+            fields: vec![
+                FieldMapping {
+                    source: "id".into(),
+                    target: "id".into(),
+                    transforms: vec![],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+                FieldMapping {
+                    source: "name".into(),
+                    target: "name".into(),
+                    transforms: vec![],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+            ],
+            links: vec![],
+            row_filter: None,
+        };
+
+        let preview = preview_source_records_path(SourceFormat::Json, source.path(), 3).unwrap();
+        assert_eq!(preview.len(), 3);
+        let mapped = execute_source_mapping_bundle_path(&[plan], SourceFormat::Json, source.path())
+            .await
+            .unwrap();
+        assert_eq!(mapped.rows_read, 9_000);
+        assert_eq!(mapped.nodes.len(), 9_000);
+        assert_eq!(mapped.nodes[8_999].object_id, "service:service-8999");
     }
 
     #[test]

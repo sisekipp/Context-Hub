@@ -5,29 +5,32 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{DateTime, NaiveDate, Utc};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 #[cfg(test)]
 use context_hub_api::context_hub::v1::GraphFilter as ApiGraphFilter;
 use context_hub_api::context_hub::v1::{
+    AbortMultipartUploadRequest, BeginMultipartUploadRequest, CompleteMultipartUploadRequest,
     CreateOntologyRequest, DataSource, DataSourceUsage, DeleteDataSourceRequest,
     DeleteFunctionArtifactRequest, ExecuteFunctionRequest, ExecuteFunctionResponse,
     ExpandGraphRequest, FunctionArtifact, FunctionExecution, FunctionExecutionState,
     GetDataSourceUsageRequest, GetDataSourceUsageResponse, GetIngestionJobRequest,
-    GetObjectProvenanceRequest, GetObjectProvenanceResponse, GetObjectRequest,
-    GetOntologyDraftRequest, GetUploadDataSourceRequest, GetUploadDataSourceResponse,
-    GetWorkspaceRequest, GraphAggregationResult, GraphEdge, GraphNode, GraphQuery,
-    ImportGraphRequest, IngestionEvent, IngestionJob, IngestionState, ListDataSourcesRequest,
-    ListDataSourcesResponse, ListFunctionArtifactsRequest, ListFunctionArtifactsResponse,
-    ListFunctionExecutionsRequest, ListFunctionExecutionsResponse, ListIngestionEventsRequest,
-    ListIngestionEventsResponse, ListIngestionJobsRequest, ListIngestionJobsResponse,
-    ListOntologiesRequest, ListOntologiesResponse, ListOntologyDataMappingsRequest,
-    ListOntologyDataMappingsResponse, ListOntologyVersionsRequest, ListOntologyVersionsResponse,
-    ListWorkspacesResponse, Ontology, OntologyDataMapping, OntologyDraft, OntologyVersion,
-    PreviewDataSourceRequest, PreviewDataSourceResponse, PropertyProvenance,
-    PublishOntologyRequest, QueryGraphResponse, RetryIngestionJobRequest, SaveDataSourceRequest,
-    SaveOntologyDataMappingRequest, SaveOntologyDraftRequest, StartIngestionRequest,
-    TestExternalFunctionProviderRequest, TestExternalFunctionProviderResponse,
-    UploadDataSourceRequest, UploadDataSourceResponse, UploadFunctionArtifactRequest,
+    GetMultipartUploadRequest, GetObjectProvenanceRequest, GetObjectProvenanceResponse,
+    GetObjectRequest, GetOntologyDraftRequest, GetUploadDataSourceRequest,
+    GetUploadDataSourceResponse, GetWorkspaceRequest, GraphAggregationResult, GraphEdge, GraphNode,
+    GraphQuery, ImportGraphRequest, IngestionEvent, IngestionJob, IngestionState,
+    ListDataSourcesRequest, ListDataSourcesResponse, ListFunctionArtifactsRequest,
+    ListFunctionArtifactsResponse, ListFunctionExecutionsRequest, ListFunctionExecutionsResponse,
+    ListIngestionEventsRequest, ListIngestionEventsResponse, ListIngestionJobsRequest,
+    ListIngestionJobsResponse, ListOntologiesRequest, ListOntologiesResponse,
+    ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse, ListOntologyVersionsRequest,
+    ListOntologyVersionsResponse, ListWorkspacesResponse, MultipartUploadSession, Ontology,
+    OntologyDataMapping, OntologyDraft, OntologyVersion, PreviewDataSourceRequest,
+    PreviewDataSourceResponse, PropertyProvenance, PublishOntologyRequest, QueryGraphResponse,
+    RetryIngestionJobRequest, SaveDataSourceRequest, SaveOntologyDataMappingRequest,
+    SaveOntologyDraftRequest, StartIngestionRequest, TestExternalFunctionProviderRequest,
+    TestExternalFunctionProviderResponse, UploadDataSourceRequest, UploadDataSourceResponse,
+    UploadFunctionArtifactRequest, UploadMultipartPartRequest, UploadMultipartPartResponse,
     ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue, Workspace,
     data_source_service_server::{DataSourceService, DataSourceServiceServer},
     function_service_server::{FunctionService, FunctionServiceServer},
@@ -49,7 +52,7 @@ use context_hub_domain::{
 };
 use context_hub_mapping::{
     MappingDocument, MappingPlan, SourceFormat, execute_source_mapping_bundle,
-    preview_source_records,
+    execute_source_mapping_bundle_path, preview_source_records, preview_source_records_path,
 };
 use context_hub_storage::{
     ClickHouseControlPlaneRepository, ClickHouseGraphRepository, ControlPlaneRepository,
@@ -60,11 +63,15 @@ use context_hub_storage::{
     SortKind as StorageSortKind, SourceObjectStore, StorageError, StoredDataSource,
     StoredFunctionArtifact, StoredFunctionExecution, StoredIngestionEvent, StoredIngestionJob,
     StoredOntology, StoredOntologyDraft, StoredOntologyMapping, StoredOntologyVersion,
-    TraversalStep as StorageTraversalStep,
+    StoredUploadPart, StoredUploadSession, TraversalStep as StorageTraversalStep,
 };
 #[cfg(test)]
 use context_hub_storage::{MemoryGraphRepository, MemorySourceObjectStore};
 use prost_types::Timestamp;
+use ring::{
+    aead,
+    rand::{SecureRandom, SystemRandom},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -82,6 +89,9 @@ use rest_connector::{RestSourceConfiguration, fetch_rest_source};
 
 #[derive(Clone)]
 struct Runtime {
+    instance_id: Arc<String>,
+    credential_key: Arc<[u8; 32]>,
+    source_credentials: Arc<RwLock<HashMap<String, String>>>,
     ontologies: Arc<RwLock<HashMap<String, Ontology>>>,
     drafts: Arc<RwLock<HashMap<String, OntologyDraft>>>,
     versions: Arc<RwLock<HashMap<String, Vec<OntologyVersion>>>>,
@@ -91,6 +101,8 @@ struct Runtime {
     events: Arc<RwLock<HashMap<String, Vec<IngestionEvent>>>>,
     function_artifacts: Arc<RwLock<HashMap<String, FunctionArtifact>>>,
     function_executions: Arc<RwLock<Vec<FunctionExecution>>>,
+    upload_sessions: Arc<RwLock<HashMap<String, UploadSessionState>>>,
+    upload_parts: Arc<RwLock<HashMap<String, Vec<UploadPartState>>>>,
     graph: Arc<dyn GraphRepository>,
     source_store: Arc<dyn SourceObjectStore>,
     control_plane: Option<Arc<dyn ControlPlaneRepository>>,
@@ -105,10 +117,74 @@ struct UploadSourceConfiguration {
     sha256: String,
 }
 
+#[derive(Debug, Clone)]
+struct UploadSessionState {
+    id: String,
+    workspace_id: String,
+    name: String,
+    file_name: String,
+    format: i32,
+    size_bytes: u64,
+    part_size_bytes: u64,
+    state: i32,
+    revision: u64,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct UploadPartState {
+    upload_id: String,
+    workspace_id: String,
+    part_number: u32,
+    object_key: String,
+    size_bytes: u64,
+    sha256: String,
+    revision: u64,
+    uploaded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ConnectorCredentials {
+    headers: HashMap<String, String>,
+}
+
 const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
+const MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MULTIPART_UPLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const MAX_MULTIPART_PARTS: u64 = 1_024;
+const WORKER_LEASE_SECONDS: i64 = 600;
+const LEASE_LOST: &str = "worker lease lost";
+const SECRET_PLACEHOLDER: &str = "__CONTEXT_HUB_SECRET__";
 const MAX_WASM_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REST_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REST_PREVIEW_RECORDS: usize = 10_000;
+
+fn load_credential_key() -> Result<[u8; 32], StorageError> {
+    if let Ok(encoded) = std::env::var("CONNECTOR_CREDENTIAL_KEY") {
+        let decoded = BASE64.decode(encoded).map_err(|_| {
+            StorageError::InvalidRecord("CONNECTOR_CREDENTIAL_KEY must be base64-encoded".into())
+        })?;
+        return decoded.try_into().map_err(|_| {
+            StorageError::InvalidRecord(
+                "CONNECTOR_CREDENTIAL_KEY must decode to exactly 32 bytes".into(),
+            )
+        });
+    }
+    if std::env::var("AUTH_MODE").unwrap_or_else(|_| "dev".into()) != "dev" {
+        return Err(StorageError::InvalidRecord(
+            "CONNECTOR_CREDENTIAL_KEY is required outside AUTH_MODE=dev".into(),
+        ));
+    }
+    Ok(Sha256::digest(b"context-hub-development-credential-key").into())
+}
+
+fn sensitive_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "cookie" | "proxy-authorization" | "x-api-key"
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GraphCursor {
@@ -141,6 +217,9 @@ impl Runtime {
         control_plane: Option<Arc<dyn ControlPlaneRepository>>,
     ) -> Result<Self, StorageError> {
         let runtime = Self {
+            instance_id: Arc::new(Uuid::new_v4().to_string()),
+            credential_key: Arc::new(load_credential_key()?),
+            source_credentials: Arc::default(),
             ontologies: Arc::default(),
             drafts: Arc::default(),
             versions: Arc::default(),
@@ -150,6 +229,8 @@ impl Runtime {
             events: Arc::default(),
             function_artifacts: Arc::default(),
             function_executions: Arc::default(),
+            upload_sessions: Arc::default(),
+            upload_parts: Arc::default(),
             graph,
             source_store,
             control_plane,
@@ -280,13 +361,22 @@ impl Runtime {
                 .push(version);
         }
         self.versions.write().await.extend(versions);
-        self.data_sources.write().await.extend(
-            snapshot
-                .data_sources
-                .into_iter()
-                .map(proto_data_source)
-                .map(|source| (source.id.clone(), source)),
-        );
+        for stored in snapshot.data_sources {
+            let envelope = stored.credential_envelope.clone();
+            let source = proto_data_source(stored);
+            if !envelope.is_empty() {
+                self.decrypt_connector_credentials(&source.id, &envelope)
+                    .map_err(|error| StorageError::InvalidRecord(error.message().to_owned()))?;
+                self.source_credentials
+                    .write()
+                    .await
+                    .insert(source.id.clone(), envelope);
+            }
+            self.data_sources
+                .write()
+                .await
+                .insert(source.id.clone(), source);
+        }
         self.mappings.write().await.extend(
             snapshot
                 .mappings
@@ -341,9 +431,17 @@ impl Runtime {
 
     async fn persist_data_source(&self, value: &DataSource) -> Result<(), Status> {
         if let Some(repository) = &self.control_plane {
+            let envelope = self
+                .source_credentials
+                .read()
+                .await
+                .get(&value.id)
+                .cloned()
+                .unwrap_or_default();
             repository
                 .save_data_source(
-                    &stored_data_source(value, persistence_revision()).map_err(storage_status)?,
+                    &stored_data_source(value, &envelope, persistence_revision())
+                        .map_err(storage_status)?,
                 )
                 .await
                 .map_err(storage_status)?;
@@ -353,14 +451,265 @@ impl Runtime {
 
     async fn delete_persisted_data_source(&self, value: &DataSource) -> Result<(), Status> {
         if let Some(repository) = &self.control_plane {
+            let envelope = self
+                .source_credentials
+                .read()
+                .await
+                .get(&value.id)
+                .cloned()
+                .unwrap_or_default();
             repository
                 .delete_data_source(
-                    &stored_data_source(value, persistence_revision()).map_err(storage_status)?,
+                    &stored_data_source(value, &envelope, persistence_revision())
+                        .map_err(storage_status)?,
                 )
                 .await
                 .map_err(storage_status)?;
         }
         Ok(())
+    }
+
+    fn encrypt_connector_credentials(
+        &self,
+        source_id: &str,
+        credentials: &ConnectorCredentials,
+    ) -> Result<String, Status> {
+        let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, self.credential_key.as_ref())
+            .map_err(|_| Status::internal("connector credential key is invalid"))?;
+        let key = aead::LessSafeKey::new(unbound);
+        let mut nonce = [0_u8; 12];
+        SystemRandom::new()
+            .fill(&mut nonce)
+            .map_err(|_| Status::internal("connector credential nonce generation failed"))?;
+        let mut sealed = serde_json::to_vec(credentials)
+            .map_err(|error| Status::internal(format!("credentials cannot be encoded: {error}")))?;
+        key.seal_in_place_append_tag(
+            aead::Nonce::assume_unique_for_key(nonce),
+            aead::Aad::from(source_id.as_bytes()),
+            &mut sealed,
+        )
+        .map_err(|_| Status::internal("connector credentials could not be encrypted"))?;
+        let mut envelope = nonce.to_vec();
+        envelope.extend(sealed);
+        Ok(BASE64.encode(envelope))
+    }
+
+    fn decrypt_connector_credentials(
+        &self,
+        source_id: &str,
+        envelope: &str,
+    ) -> Result<ConnectorCredentials, Status> {
+        if envelope.is_empty() {
+            return Ok(ConnectorCredentials::default());
+        }
+        let mut sealed = BASE64
+            .decode(envelope)
+            .map_err(|_| Status::internal("stored credential envelope is invalid"))?;
+        if sealed.len() < 12 + aead::AES_256_GCM.tag_len() {
+            return Err(Status::internal("stored credential envelope is truncated"));
+        }
+        let nonce: [u8; 12] = sealed[..12]
+            .try_into()
+            .map_err(|_| Status::internal("stored credential nonce is invalid"))?;
+        let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, self.credential_key.as_ref())
+            .map_err(|_| Status::internal("connector credential key is invalid"))?;
+        let plaintext = aead::LessSafeKey::new(unbound)
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::from(source_id.as_bytes()),
+                &mut sealed[12..],
+            )
+            .map_err(|_| Status::internal("stored connector credentials cannot be decrypted"))?;
+        serde_json::from_slice(plaintext)
+            .map_err(|_| Status::internal("stored connector credentials are invalid"))
+    }
+
+    async fn protect_source_credentials(&self, source: &mut DataSource) -> Result<(), Status> {
+        if !matches!(source.kind, 2 | 3) {
+            return Ok(());
+        }
+        let previous_envelope = self
+            .source_credentials
+            .read()
+            .await
+            .get(&source.id)
+            .cloned()
+            .unwrap_or_default();
+        let previous = self.decrypt_connector_credentials(&source.id, &previous_envelope)?;
+        let mut configuration: serde_json::Value = serde_json::from_str(&source.configuration_json)
+            .map_err(|error| {
+                Status::invalid_argument(format!("source configuration is invalid: {error}"))
+            })?;
+        let headers = configuration
+            .get_mut("headers")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| Status::invalid_argument("source headers must be an object"))?;
+        let mut credentials = ConnectorCredentials::default();
+        for (name, value) in headers.iter_mut() {
+            if !sensitive_header(name) {
+                continue;
+            }
+            let raw = value
+                .as_str()
+                .ok_or_else(|| Status::invalid_argument("header values must be strings"))?;
+            let secret = if raw == SECRET_PLACEHOLDER {
+                previous
+                    .headers
+                    .iter()
+                    .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.clone())
+                    .ok_or_else(|| {
+                        Status::failed_precondition(format!(
+                            "sensitive header '{name}' has no stored value"
+                        ))
+                    })?
+            } else {
+                raw.to_owned()
+            };
+            credentials.headers.insert(name.clone(), secret);
+            *value = serde_json::Value::String(SECRET_PLACEHOLDER.into());
+        }
+        source.configuration_json = serde_json::to_string(&configuration)
+            .map_err(|error| Status::internal(format!("source cannot be encoded: {error}")))?;
+        let envelope = if credentials.headers.is_empty() {
+            String::new()
+        } else {
+            self.encrypt_connector_credentials(&source.id, &credentials)?
+        };
+        let mut envelopes = self.source_credentials.write().await;
+        if envelope.is_empty() {
+            envelopes.remove(&source.id);
+        } else {
+            envelopes.insert(source.id.clone(), envelope);
+        }
+        Ok(())
+    }
+
+    async fn source_with_credentials(&self, source: &DataSource) -> Result<DataSource, Status> {
+        let envelope = self
+            .source_credentials
+            .read()
+            .await
+            .get(&source.id)
+            .cloned()
+            .unwrap_or_default();
+        if envelope.is_empty() {
+            return Ok(source.clone());
+        }
+        let credentials = self.decrypt_connector_credentials(&source.id, &envelope)?;
+        let mut hydrated = source.clone();
+        let mut configuration: serde_json::Value =
+            serde_json::from_str(&hydrated.configuration_json)
+                .map_err(|_| Status::internal("stored source configuration is invalid"))?;
+        let headers = configuration
+            .get_mut("headers")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| Status::internal("stored source headers are invalid"))?;
+        for (name, secret) in credentials.headers {
+            if let Some((_, value)) = headers
+                .iter_mut()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(&name))
+            {
+                *value = serde_json::Value::String(secret);
+            }
+        }
+        hydrated.configuration_json = serde_json::to_string(&configuration)
+            .map_err(|_| Status::internal("stored source configuration cannot be encoded"))?;
+        Ok(hydrated)
+    }
+
+    async fn persist_upload_session(&self, value: &UploadSessionState) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .save_upload_session(&stored_upload_session(value).map_err(storage_status)?)
+                .await
+                .map_err(storage_status)?;
+        }
+        self.upload_sessions
+            .write()
+            .await
+            .insert(value.id.clone(), value.clone());
+        Ok(())
+    }
+
+    async fn upload_session(&self, id: &str) -> Result<UploadSessionState, Status> {
+        if let Some(repository) = &self.control_plane {
+            let stored = repository
+                .get_upload_session(parse_uuid(id, "upload_id")?)
+                .await
+                .map_err(storage_status)?;
+            return proto_upload_session_state(stored).map_err(storage_status);
+        }
+        self.upload_sessions
+            .read()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("multipart upload not found"))
+    }
+
+    async fn persist_upload_part(&self, value: &UploadPartState) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .save_upload_part(&stored_upload_part(value).map_err(storage_status)?)
+                .await
+                .map_err(storage_status)?;
+        }
+        let mut parts = self.upload_parts.write().await;
+        let values = parts.entry(value.upload_id.clone()).or_default();
+        values.retain(|part| part.part_number != value.part_number);
+        values.push(value.clone());
+        Ok(())
+    }
+
+    async fn upload_part_values(
+        &self,
+        session: &UploadSessionState,
+    ) -> Result<Vec<UploadPartState>, Status> {
+        let mut parts = if let Some(repository) = &self.control_plane {
+            repository
+                .list_upload_parts(
+                    parse_uuid(&session.workspace_id, "workspace_id")?,
+                    parse_uuid(&session.id, "upload_id")?,
+                )
+                .await
+                .map_err(storage_status)?
+                .into_iter()
+                .map(proto_upload_part_state)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_status)?
+        } else {
+            self.upload_parts
+                .read()
+                .await
+                .get(&session.id)
+                .cloned()
+                .unwrap_or_default()
+        };
+        parts.sort_by_key(|part| part.part_number);
+        Ok(parts)
+    }
+
+    async fn multipart_session_response(
+        &self,
+        session: &UploadSessionState,
+    ) -> Result<MultipartUploadSession, Status> {
+        let parts = self.upload_part_values(session).await?;
+        let uploaded_parts = u32::try_from(parts.len())
+            .map_err(|_| Status::internal("multipart part count is outside the supported range"))?;
+        Ok(MultipartUploadSession {
+            id: session.id.clone(),
+            workspace_id: session.workspace_id.clone(),
+            name: session.name.clone(),
+            file_name: session.file_name.clone(),
+            format: session.format,
+            size_bytes: session.size_bytes,
+            part_size_bytes: session.part_size_bytes,
+            uploaded_parts,
+            uploaded_bytes: parts.iter().map(|part| part.size_bytes).sum(),
+            expires_at: Some(timestamp(session.expires_at)),
+            state: session.state,
+        })
     }
 
     async fn persist_mapping(&self, value: &OntologyDataMapping) -> Result<(), Status> {
@@ -381,6 +730,89 @@ impl Runtime {
                 .map_err(storage_status)?;
         }
         Ok(())
+    }
+
+    async fn acquire_job_lease(&self, job_id: &str) -> Result<bool, Status> {
+        let now = Utc::now();
+        let candidate = {
+            let jobs = self.jobs.read().await;
+            let Some(job) = jobs.get(job_id) else {
+                return Ok(false);
+            };
+            let lease_is_live = job
+                .lease_expires_at
+                .as_ref()
+                .and_then(|value| timestamp_micros(Some(value)).ok())
+                .is_some_and(|expires| expires > now.timestamp_micros());
+            if lease_is_live && job.lease_owner != *self.instance_id {
+                return Ok(false);
+            }
+            let mut job = job.clone();
+            job.lease_owner.clone_from(&self.instance_id);
+            job.lease_expires_at = Some(timestamp(now + Duration::seconds(WORKER_LEASE_SECONDS)));
+            job
+        };
+        self.persist_job(&candidate).await?;
+        if let Some(repository) = &self.control_plane {
+            let persisted = repository
+                .get_job(parse_uuid(job_id, "job_id")?)
+                .await
+                .map_err(storage_status)?;
+            if persisted.lease_owner != *self.instance_id {
+                return Ok(false);
+            }
+        }
+        self.jobs.write().await.insert(job_id.to_owned(), candidate);
+        Ok(true)
+    }
+
+    async fn renew_job_lease(&self, job_id: &str) -> Result<(), String> {
+        if let Some(repository) = &self.control_plane {
+            let persisted = repository
+                .get_job(Uuid::parse_str(job_id).map_err(|error| error.to_string())?)
+                .await
+                .map_err(|error| error.to_string())?;
+            if persisted.lease_owner != *self.instance_id {
+                return Err(LEASE_LOST.into());
+            }
+        }
+        let renewed = {
+            let mut jobs = self.jobs.write().await;
+            let job = jobs.get_mut(job_id).ok_or_else(|| LEASE_LOST.to_owned())?;
+            if job.lease_owner != *self.instance_id {
+                return Err(LEASE_LOST.into());
+            }
+            job.lease_expires_at = Some(timestamp(
+                Utc::now() + Duration::seconds(WORKER_LEASE_SECONDS),
+            ));
+            job.clone()
+        };
+        self.persist_job(&renewed)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn checkpoint_job(
+        &self,
+        job_id: &str,
+        stage: &str,
+        nodes: u64,
+        edges: u64,
+    ) -> Result<(), String> {
+        let checkpoint = {
+            let mut jobs = self.jobs.write().await;
+            let job = jobs.get_mut(job_id).ok_or_else(|| LEASE_LOST.to_owned())?;
+            if job.lease_owner != *self.instance_id {
+                return Err(LEASE_LOST.into());
+            }
+            job.checkpoint_stage = stage.into();
+            job.checkpoint_nodes = nodes;
+            job.checkpoint_edges = edges;
+            job.clone()
+        };
+        self.persist_job(&checkpoint)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn append_ingestion_events(&self, values: Vec<IngestionEvent>) -> Result<(), Status> {
@@ -572,11 +1004,21 @@ impl Runtime {
         mapping: OntologyDataMapping,
         version: OntologyVersion,
     ) {
+        match self.acquire_job_lease(&job_id).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::error!(%error, %job_id, "failed to acquire ingestion worker lease");
+                return;
+            }
+        }
         let running = {
             let mut jobs = self.jobs.write().await;
             jobs.get_mut(&job_id).map(|job| {
                 job.state = IngestionState::Running as i32;
-                job.started_at = Some(timestamp(Utc::now()));
+                if job.started_at.is_none() {
+                    job.started_at = Some(timestamp(Utc::now()));
+                }
                 job.clone()
             })
         };
@@ -596,7 +1038,13 @@ impl Runtime {
                 "{}",
             )])
             .await;
-        let result = self.ingest_source(&source, &mapping, &version).await;
+        let result = self
+            .ingest_source(&job_id, &source, &mapping, &version)
+            .await;
+        if result.as_ref().is_err_and(|error| error == LEASE_LOST) {
+            tracing::warn!(%job_id, "stopped ingestion after losing worker lease");
+            return;
+        }
         let mut result_events = Vec::new();
         let completed = {
             let mut jobs = self.jobs.write().await;
@@ -644,6 +1092,8 @@ impl Runtime {
                 }
             }
             job.completed_at = Some(timestamp(Utc::now()));
+            job.lease_owner.clear();
+            job.lease_expires_at = None;
             job.clone()
         };
         if let Err(error) = self.append_ingestion_events(result_events).await {
@@ -714,33 +1164,15 @@ impl Runtime {
 
     async fn ingest_source(
         &self,
+        job_id: &str,
         source: &DataSource,
         mapping: &OntologyDataMapping,
         version: &OntologyVersion,
     ) -> Result<context_hub_mapping::MappedGraphBatch, String> {
-        let (format, content) = match source.kind {
-            1 => {
-                let (configuration, content) = self.read_uploaded_source(source).await?;
-                (configuration.format, content)
-            }
-            2 => {
-                let configuration: RestSourceConfiguration =
-                    serde_json::from_str(&source.configuration_json).map_err(|error| {
-                        format!("REST source configuration is invalid: {error}")
-                    })?;
-                let content = fetch_rest_source(&configuration).await?;
-                (SourceFormat::Json, content)
-            }
-            3 => {
-                let configuration: GraphqlSourceConfiguration =
-                    serde_json::from_str(&source.configuration_json).map_err(|error| {
-                        format!("GraphQL source configuration is invalid: {error}")
-                    })?;
-                let content = fetch_graphql_source(&configuration).await?;
-                (SourceFormat::Json, content)
-            }
-            _ => return Err("data source kind is not supported for ingestion".into()),
-        };
+        let hydrated = self
+            .source_with_credentials(source)
+            .await
+            .map_err(|error| error.message().to_owned())?;
         let document: MappingDocument = serde_json::from_str(&mapping.mapping_plan_json)
             .map_err(|error| format!("mapping document is invalid: {error}"))?;
         document
@@ -751,10 +1183,54 @@ impl Runtime {
         for plan in document.plans() {
             validate_worker_plan(plan, &definition)?;
         }
-        let mapped = execute_source_mapping_bundle(document.plans(), format, &content)
-            .await
-            .map_err(|error| error.to_string())?;
-        self.write_mapped_graph(source, version, &mapped).await?;
+        let mapped = match source.kind {
+            1 => {
+                let configuration: UploadSourceConfiguration =
+                    serde_json::from_str(&source.configuration_json)
+                        .map_err(|error| format!("source is not an uploaded object: {error}"))?;
+                let temporary = tempfile::NamedTempFile::new()
+                    .map_err(|error| format!("temporary source file cannot be created: {error}"))?;
+                let (size_bytes, checksum) = self
+                    .source_store
+                    .download(&configuration.object_key, temporary.path())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if size_bytes != configuration.size_bytes || checksum != configuration.sha256 {
+                    return Err("uploaded object no longer matches its source definition".into());
+                }
+                execute_source_mapping_bundle_path(
+                    document.plans(),
+                    configuration.format,
+                    temporary.path(),
+                )
+                .await
+                .map_err(|error| error.to_string())?
+            }
+            2 => {
+                let configuration: RestSourceConfiguration =
+                    serde_json::from_str(&hydrated.configuration_json).map_err(|error| {
+                        format!("REST source configuration is invalid: {error}")
+                    })?;
+                let content = fetch_rest_source(&configuration).await?;
+                execute_source_mapping_bundle(document.plans(), SourceFormat::Json, &content)
+                    .await
+                    .map_err(|error| error.to_string())?
+            }
+            3 => {
+                let configuration: GraphqlSourceConfiguration =
+                    serde_json::from_str(&hydrated.configuration_json).map_err(|error| {
+                        format!("GraphQL source configuration is invalid: {error}")
+                    })?;
+                let content = fetch_graphql_source(&configuration).await?;
+                execute_source_mapping_bundle(document.plans(), SourceFormat::Json, &content)
+                    .await
+                    .map_err(|error| error.to_string())?
+            }
+            _ => return Err("data source kind is not supported for ingestion".into()),
+        };
+        self.renew_job_lease(job_id).await?;
+        self.write_mapped_graph(job_id, source, version, &mapped)
+            .await?;
         Ok(mapped)
     }
 
@@ -789,8 +1265,10 @@ impl Runtime {
         Ok((configuration, content))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn write_mapped_graph(
         &self,
+        job_id: &str,
         source: &DataSource,
         version: &OntologyVersion,
         mapped: &context_hub_mapping::MappedGraphBatch,
@@ -851,18 +1329,63 @@ impl Runtime {
                 version: write_version,
             })
             .collect::<Vec<_>>();
-        for chunk in nodes.chunks(5_000) {
+        let (checkpoint_nodes, checkpoint_edges) = self
+            .jobs
+            .read()
+            .await
+            .get(job_id)
+            .map(|job| (job.checkpoint_nodes, job.checkpoint_edges))
+            .ok_or_else(|| LEASE_LOST.to_owned())?;
+        let node_offset = usize::try_from(checkpoint_nodes)
+            .unwrap_or(usize::MAX)
+            .min(nodes.len());
+        for chunk in nodes[node_offset..].chunks(5_000) {
+            self.renew_job_lease(job_id).await?;
             self.graph
                 .write_graph(chunk, &[])
                 .await
                 .map_err(|error| error.to_string())?;
+            let written = self
+                .jobs
+                .read()
+                .await
+                .get(job_id)
+                .map_or(0, |job| job.checkpoint_nodes)
+                + u64::try_from(chunk.len()).map_err(|error| error.to_string())?;
+            self.checkpoint_job(job_id, "nodes", written, checkpoint_edges)
+                .await?;
         }
-        for chunk in edges.chunks(20_000) {
+        let edge_offset = usize::try_from(checkpoint_edges)
+            .unwrap_or(usize::MAX)
+            .min(edges.len());
+        for chunk in edges[edge_offset..].chunks(20_000) {
+            self.renew_job_lease(job_id).await?;
             self.graph
                 .write_graph(&[], chunk)
                 .await
                 .map_err(|error| error.to_string())?;
+            let written = self
+                .jobs
+                .read()
+                .await
+                .get(job_id)
+                .map_or(0, |job| job.checkpoint_edges)
+                + u64::try_from(chunk.len()).map_err(|error| error.to_string())?;
+            self.checkpoint_job(
+                job_id,
+                "edges",
+                u64::try_from(nodes.len()).map_err(|error| error.to_string())?,
+                written,
+            )
+            .await?;
         }
+        self.checkpoint_job(
+            job_id,
+            "completed",
+            u64::try_from(nodes.len()).map_err(|error| error.to_string())?,
+            u64::try_from(edges.len()).map_err(|error| error.to_string())?,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -1458,6 +1981,7 @@ impl DataSourceService for Runtime {
             }
             _ => return Err(Status::invalid_argument("data source kind is unsupported")),
         }
+        self.protect_source_credentials(&mut source).await?;
         self.persist_data_source(&source).await?;
         self.data_sources
             .write()
@@ -1538,6 +2062,7 @@ impl DataSourceService for Runtime {
         }
         self.delete_persisted_data_source(&source).await?;
         self.data_sources.write().await.remove(&id);
+        self.source_credentials.write().await.remove(&id);
         if source.kind == 1
             && let Ok(configuration) =
                 serde_json::from_str::<UploadSourceConfiguration>(&source.configuration_json)
@@ -1620,6 +2145,270 @@ impl DataSourceService for Runtime {
         }))
     }
 
+    async fn begin_multipart_upload(
+        &self,
+        request: Request<BeginMultipartUploadRequest>,
+    ) -> Result<Response<MultipartUploadSession>, Status> {
+        let request = request.into_inner();
+        if request.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if request.name.trim().is_empty() || request.file_name.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "source name and file name are required",
+            ));
+        }
+        source_format(request.format)?;
+        if request.size_bytes == 0 || request.size_bytes > MAX_MULTIPART_UPLOAD_BYTES {
+            return Err(Status::resource_exhausted(
+                "multipart upload must contain between 1 byte and 5 GiB",
+            ));
+        }
+        if request.size_bytes.div_ceil(MULTIPART_PART_BYTES) > MAX_MULTIPART_PARTS {
+            return Err(Status::resource_exhausted(
+                "multipart upload has too many parts",
+            ));
+        }
+        let now = Utc::now();
+        let session = UploadSessionState {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: request.workspace_id,
+            name: request.name,
+            file_name: request.file_name,
+            format: request.format,
+            size_bytes: request.size_bytes,
+            part_size_bytes: MULTIPART_PART_BYTES,
+            state: 1,
+            revision: persistence_revision(),
+            created_at: now,
+            expires_at: now + Duration::hours(24),
+        };
+        self.persist_upload_session(&session).await?;
+        Ok(Response::new(
+            self.multipart_session_response(&session).await?,
+        ))
+    }
+
+    async fn get_multipart_upload(
+        &self,
+        request: Request<GetMultipartUploadRequest>,
+    ) -> Result<Response<MultipartUploadSession>, Status> {
+        let session = self.upload_session(&request.into_inner().upload_id).await?;
+        if session.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        Ok(Response::new(
+            self.multipart_session_response(&session).await?,
+        ))
+    }
+
+    async fn upload_multipart_part(
+        &self,
+        request: Request<UploadMultipartPartRequest>,
+    ) -> Result<Response<UploadMultipartPartResponse>, Status> {
+        let request = request.into_inner();
+        let session = self.upload_session(&request.upload_id).await?;
+        if session.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if session.state != 1 {
+            return Err(Status::failed_precondition(
+                "multipart upload is not active",
+            ));
+        }
+        if session.expires_at <= Utc::now() {
+            return Err(Status::failed_precondition("multipart upload has expired"));
+        }
+        let part_count = session.size_bytes.div_ceil(session.part_size_bytes);
+        if request.part_number == 0 || u64::from(request.part_number) > part_count {
+            return Err(Status::invalid_argument(
+                "multipart part number is outside the upload",
+            ));
+        }
+        let expected_size = if u64::from(request.part_number) == part_count {
+            session.size_bytes - (part_count - 1) * session.part_size_bytes
+        } else {
+            session.part_size_bytes
+        };
+        if request.content.len() as u64 != expected_size {
+            return Err(Status::invalid_argument(format!(
+                "multipart part {} must contain exactly {expected_size} bytes",
+                request.part_number
+            )));
+        }
+        let checksum = sha256_hex(&request.content);
+        if request.sha256 != checksum {
+            return Err(Status::invalid_argument("multipart part checksum mismatch"));
+        }
+        let existing_parts = self.upload_part_values(&session).await?;
+        if let Some(existing) = existing_parts
+            .iter()
+            .find(|part| part.part_number == request.part_number)
+        {
+            if existing.sha256 == checksum && existing.size_bytes == expected_size {
+                return Ok(Response::new(UploadMultipartPartResponse {
+                    part_number: existing.part_number,
+                    size_bytes: existing.size_bytes,
+                    sha256: existing.sha256.clone(),
+                }));
+            }
+            return Err(Status::already_exists(
+                "multipart part already exists with different content",
+            ));
+        }
+        let next_part = u32::try_from(existing_parts.len() + 1)
+            .map_err(|_| Status::resource_exhausted("multipart upload has too many parts"))?;
+        if request.part_number != next_part {
+            return Err(Status::failed_precondition(format!(
+                "multipart parts must be uploaded in order; expected part {next_part}"
+            )));
+        }
+        let object_key = format!(
+            "_multipart/{}/{}/{:06}",
+            session.workspace_id, session.id, request.part_number
+        );
+        self.source_store
+            .put(&object_key, request.content)
+            .await
+            .map_err(storage_status)?;
+        let part = UploadPartState {
+            upload_id: session.id,
+            workspace_id: session.workspace_id,
+            part_number: request.part_number,
+            object_key,
+            size_bytes: expected_size,
+            sha256: checksum.clone(),
+            revision: persistence_revision(),
+            uploaded_at: Utc::now(),
+        };
+        if let Err(error) = self.persist_upload_part(&part).await {
+            let _ = self.source_store.delete(&part.object_key).await;
+            return Err(error);
+        }
+        Ok(Response::new(UploadMultipartPartResponse {
+            part_number: part.part_number,
+            size_bytes: part.size_bytes,
+            sha256: checksum,
+        }))
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        request: Request<CompleteMultipartUploadRequest>,
+    ) -> Result<Response<UploadDataSourceResponse>, Status> {
+        let request = request.into_inner();
+        let mut session = self.upload_session(&request.upload_id).await?;
+        if session.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if session.state != 1 || session.expires_at <= Utc::now() {
+            return Err(Status::failed_precondition(
+                "multipart upload is not active",
+            ));
+        }
+        if request.size_bytes != session.size_bytes || request.sha256.len() != 64 {
+            return Err(Status::invalid_argument(
+                "multipart upload metadata mismatch",
+            ));
+        }
+        let parts = self.upload_part_values(&session).await?;
+        let part_count = session.size_bytes.div_ceil(session.part_size_bytes);
+        if parts.len() as u64 != part_count
+            || parts
+                .iter()
+                .enumerate()
+                .any(|(index, part)| part.part_number as usize != index + 1)
+        {
+            return Err(Status::failed_precondition(
+                "multipart upload has missing parts",
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let object_key = format!(
+            "workspaces/{}/sources/{}/{}",
+            session.workspace_id,
+            id,
+            safe_file_name(&session.file_name)
+        );
+        let part_keys = parts
+            .iter()
+            .map(|part| part.object_key.clone())
+            .collect::<Vec<_>>();
+        let (size_bytes, checksum) = self
+            .source_store
+            .compose(&object_key, &part_keys)
+            .await
+            .map_err(storage_status)?;
+        if size_bytes != session.size_bytes || checksum != request.sha256 {
+            let _ = self.source_store.delete(&object_key).await;
+            return Err(Status::invalid_argument(
+                "completed upload checksum mismatch",
+            ));
+        }
+        let configuration = UploadSourceConfiguration {
+            object_key: object_key.clone(),
+            file_name: session.file_name.clone(),
+            format: source_format(session.format)?,
+            size_bytes,
+            sha256: checksum.clone(),
+        };
+        let source = DataSource {
+            id,
+            workspace_id: session.workspace_id.clone(),
+            name: session.name.clone(),
+            kind: 1,
+            configuration_json: serde_json::to_string(&configuration)
+                .map_err(|error| Status::internal(error.to_string()))?,
+        };
+        if let Err(error) = self.persist_data_source(&source).await {
+            let _ = self.source_store.delete(&object_key).await;
+            return Err(error);
+        }
+        self.data_sources
+            .write()
+            .await
+            .insert(source.id.clone(), source.clone());
+        session.state = 2;
+        session.revision = persistence_revision();
+        self.persist_upload_session(&session).await?;
+        for part in parts {
+            if let Err(error) = self.source_store.delete(&part.object_key).await {
+                tracing::warn!(%error, upload_id = %session.id, "could not remove multipart part");
+            }
+        }
+        Ok(Response::new(UploadDataSourceResponse {
+            data_source: Some(source),
+            object_key,
+            size_bytes,
+            sha256: checksum,
+        }))
+    }
+
+    async fn abort_multipart_upload(
+        &self,
+        request: Request<AbortMultipartUploadRequest>,
+    ) -> Result<Response<()>, Status> {
+        let mut session = self.upload_session(&request.into_inner().upload_id).await?;
+        if session.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if session.state == 2 {
+            return Err(Status::failed_precondition(
+                "completed upload cannot be aborted",
+            ));
+        }
+        for part in self.upload_part_values(&session).await? {
+            if let Err(error) = self.source_store.delete(&part.object_key).await {
+                tracing::warn!(%error, upload_id = %session.id, "could not remove aborted multipart part");
+            }
+        }
+        session.state = 3;
+        session.revision = persistence_revision();
+        self.persist_upload_session(&session).await?;
+        self.upload_parts.write().await.remove(&session.id);
+        Ok(Response::new(()))
+    }
+
     async fn get_upload(
         &self,
         request: Request<GetUploadDataSourceRequest>,
@@ -1673,17 +2462,37 @@ impl DataSourceService for Runtime {
                 "preview does not support this data source kind",
             ));
         }
+        let hydrated = self.source_with_credentials(&source).await?;
         let mut records = if source.kind == 1 {
-            let (configuration, content) = self
-                .read_uploaded_source(&source)
+            let configuration: UploadSourceConfiguration =
+                serde_json::from_str(&source.configuration_json).map_err(|error| {
+                    Status::failed_precondition(format!(
+                        "source is not an uploaded object: {error}"
+                    ))
+                })?;
+            let temporary = tempfile::NamedTempFile::new().map_err(|error| {
+                Status::internal(format!("temporary preview file cannot be created: {error}"))
+            })?;
+            let (size_bytes, checksum) = self
+                .source_store
+                .download(&configuration.object_key, temporary.path())
                 .await
-                .map_err(Status::failed_precondition)?;
-            preview_source_records(configuration.format, &content, MAX_REST_PREVIEW_RECORDS)
-                .map_err(|error| Status::failed_precondition(error.to_string()))?
+                .map_err(storage_status)?;
+            if size_bytes != configuration.size_bytes || checksum != configuration.sha256 {
+                return Err(Status::failed_precondition(
+                    "uploaded object no longer matches its source definition",
+                ));
+            }
+            preview_source_records_path(
+                configuration.format,
+                temporary.path(),
+                MAX_REST_PREVIEW_RECORDS,
+            )
+            .map_err(|error| Status::failed_precondition(error.to_string()))?
         } else {
             let content = if source.kind == 2 {
                 let mut configuration: RestSourceConfiguration =
-                    serde_json::from_str(&source.configuration_json).map_err(|error| {
+                    serde_json::from_str(&hydrated.configuration_json).map_err(|error| {
                         Status::failed_precondition(format!(
                             "REST source configuration is invalid: {error}"
                         ))
@@ -1695,7 +2504,7 @@ impl DataSourceService for Runtime {
                     .map_err(Status::failed_precondition)?
             } else {
                 let mut configuration: GraphqlSourceConfiguration =
-                    serde_json::from_str(&source.configuration_json).map_err(|error| {
+                    serde_json::from_str(&hydrated.configuration_json).map_err(|error| {
                         Status::failed_precondition(format!(
                             "GraphQL source configuration is invalid: {error}"
                         ))
@@ -1827,6 +2636,11 @@ impl IngestionService for Runtime {
             created_at: Some(timestamp(Utc::now())),
             started_at: None,
             completed_at: None,
+            checkpoint_stage: String::new(),
+            checkpoint_nodes: 0,
+            checkpoint_edges: 0,
+            lease_owner: String::new(),
+            lease_expires_at: None,
         };
         self.persist_job(&job).await?;
         self.jobs.write().await.insert(job.id.clone(), job.clone());
@@ -1931,6 +2745,11 @@ impl IngestionService for Runtime {
             created_at: Some(timestamp(Utc::now())),
             started_at: Some(timestamp(Utc::now())),
             completed_at: None,
+            checkpoint_stage: String::new(),
+            checkpoint_nodes: 0,
+            checkpoint_edges: 0,
+            lease_owner: String::new(),
+            lease_expires_at: None,
         };
         self.persist_job(&job).await?;
         self.jobs.write().await.insert(job.id.clone(), job.clone());
@@ -3138,6 +3957,15 @@ const fn proto_source_format(value: SourceFormat) -> i32 {
     }
 }
 
+fn sha256_hex(content: &[u8]) -> String {
+    Sha256::digest(content)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+            output
+        })
+}
+
 fn safe_file_name(value: &str) -> String {
     let value = value
         .rsplit(['/', '\\'])
@@ -3440,13 +4268,18 @@ fn proto_version(
     })
 }
 
-fn stored_data_source(value: &DataSource, revision: u64) -> Result<StoredDataSource, StorageError> {
+fn stored_data_source(
+    value: &DataSource,
+    credential_envelope: &str,
+    revision: u64,
+) -> Result<StoredDataSource, StorageError> {
     Ok(StoredDataSource {
         id: parse_uuid_storage(&value.id)?,
         workspace_id: parse_uuid_storage(&value.workspace_id)?,
         name: value.name.clone(),
         kind: value.kind,
         configuration_json: value.configuration_json.clone(),
+        credential_envelope: credential_envelope.to_owned(),
         revision,
     })
 }
@@ -3459,6 +4292,72 @@ fn proto_data_source(value: StoredDataSource) -> DataSource {
         kind: value.kind,
         configuration_json: value.configuration_json,
     }
+}
+
+fn stored_upload_session(value: &UploadSessionState) -> Result<StoredUploadSession, StorageError> {
+    Ok(StoredUploadSession {
+        id: parse_uuid_storage(&value.id)?,
+        workspace_id: parse_uuid_storage(&value.workspace_id)?,
+        name: value.name.clone(),
+        file_name: value.file_name.clone(),
+        format: value.format,
+        size_bytes: value.size_bytes,
+        part_size_bytes: value.part_size_bytes,
+        state: value.state,
+        revision: value.revision,
+        created_at_micros: value.created_at.timestamp_micros(),
+        expires_at_micros: value.expires_at.timestamp_micros(),
+    })
+}
+
+fn proto_upload_session_state(
+    value: StoredUploadSession,
+) -> Result<UploadSessionState, StorageError> {
+    Ok(UploadSessionState {
+        id: value.id.to_string(),
+        workspace_id: value.workspace_id.to_string(),
+        name: value.name,
+        file_name: value.file_name,
+        format: value.format,
+        size_bytes: value.size_bytes,
+        part_size_bytes: value.part_size_bytes,
+        state: value.state,
+        revision: value.revision,
+        created_at: DateTime::from_timestamp_micros(value.created_at_micros).ok_or_else(|| {
+            StorageError::InvalidRecord("upload creation timestamp is invalid".into())
+        })?,
+        expires_at: DateTime::from_timestamp_micros(value.expires_at_micros).ok_or_else(|| {
+            StorageError::InvalidRecord("upload expiration timestamp is invalid".into())
+        })?,
+    })
+}
+
+fn stored_upload_part(value: &UploadPartState) -> Result<StoredUploadPart, StorageError> {
+    Ok(StoredUploadPart {
+        upload_id: parse_uuid_storage(&value.upload_id)?,
+        workspace_id: parse_uuid_storage(&value.workspace_id)?,
+        part_number: value.part_number,
+        object_key: value.object_key.clone(),
+        size_bytes: value.size_bytes,
+        sha256: value.sha256.clone(),
+        revision: value.revision,
+        uploaded_at_micros: value.uploaded_at.timestamp_micros(),
+    })
+}
+
+fn proto_upload_part_state(value: StoredUploadPart) -> Result<UploadPartState, StorageError> {
+    Ok(UploadPartState {
+        upload_id: value.upload_id.to_string(),
+        workspace_id: value.workspace_id.to_string(),
+        part_number: value.part_number,
+        object_key: value.object_key,
+        size_bytes: value.size_bytes,
+        sha256: value.sha256,
+        revision: value.revision,
+        uploaded_at: DateTime::from_timestamp_micros(value.uploaded_at_micros).ok_or_else(
+            || StorageError::InvalidRecord("upload part timestamp is invalid".into()),
+        )?,
+    })
 }
 
 fn stored_mapping(value: &OntologyDataMapping) -> Result<StoredOntologyMapping, StorageError> {
@@ -3512,6 +4411,15 @@ fn stored_job(value: &IngestionJob, revision: u64) -> Result<StoredIngestionJob,
             .as_ref()
             .map(|value| timestamp_micros(Some(value)))
             .transpose()?,
+        checkpoint_stage: value.checkpoint_stage.clone(),
+        checkpoint_nodes: value.checkpoint_nodes,
+        checkpoint_edges: value.checkpoint_edges,
+        lease_owner: value.lease_owner.clone(),
+        lease_expires_at_micros: value
+            .lease_expires_at
+            .as_ref()
+            .map(|value| timestamp_micros(Some(value)))
+            .transpose()?,
     })
 }
 
@@ -3532,6 +4440,14 @@ fn proto_job(value: StoredIngestionJob) -> Result<IngestionJob, StorageError> {
         created_at: Some(proto_timestamp(value.created_at_micros)?),
         started_at: value.started_at_micros.map(proto_timestamp).transpose()?,
         completed_at: value.completed_at_micros.map(proto_timestamp).transpose()?,
+        checkpoint_stage: value.checkpoint_stage,
+        checkpoint_nodes: value.checkpoint_nodes,
+        checkpoint_edges: value.checkpoint_edges,
+        lease_owner: value.lease_owner,
+        lease_expires_at: value
+            .lease_expires_at_micros
+            .map(proto_timestamp)
+            .transpose()?,
     })
 }
 
@@ -4147,6 +5063,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encrypts_sensitive_connector_headers_and_only_exposes_placeholders() {
+        let runtime = Runtime::seeded().await;
+        let mut source = DataSource {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: dev_workspace_id(),
+            name: "Protected API".into(),
+            kind: 2,
+            configuration_json: serde_json::json!({
+                "url": "https://example.com/api",
+                "headers": {
+                    "Authorization": "Bearer super-secret",
+                    "X-Tenant": "development"
+                }
+            })
+            .to_string(),
+        };
+        runtime
+            .protect_source_credentials(&mut source)
+            .await
+            .unwrap();
+
+        assert!(!source.configuration_json.contains("super-secret"));
+        assert!(source.configuration_json.contains(SECRET_PLACEHOLDER));
+        let envelope = runtime
+            .source_credentials
+            .read()
+            .await
+            .get(&source.id)
+            .cloned()
+            .unwrap();
+        assert!(!envelope.contains("super-secret"));
+        let hydrated = runtime.source_with_credentials(&source).await.unwrap();
+        assert!(hydrated.configuration_json.contains("Bearer super-secret"));
+
+        let mut edited = source.clone();
+        runtime
+            .protect_source_credentials(&mut edited)
+            .await
+            .unwrap();
+        let hydrated = runtime.source_with_credentials(&edited).await.unwrap();
+        assert!(hydrated.configuration_json.contains("Bearer super-secret"));
+    }
+
+    #[tokio::test]
+    async fn multipart_uploads_are_resumable_and_checksum_validated() {
+        let runtime = Runtime::seeded().await;
+        let part_size = usize::try_from(MULTIPART_PART_BYTES).unwrap();
+        let content = vec![b'x'; part_size + 17];
+        let session = DataSourceService::begin_multipart_upload(
+            &runtime,
+            Request::new(BeginMultipartUploadRequest {
+                workspace_id: dev_workspace_id(),
+                name: "Large services".into(),
+                file_name: "services.ndjson".into(),
+                format: 2,
+                size_bytes: content.len() as u64,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(session.uploaded_parts, 0);
+
+        let first = content[..part_size].to_vec();
+        DataSourceService::upload_multipart_part(
+            &runtime,
+            Request::new(UploadMultipartPartRequest {
+                upload_id: session.id.clone(),
+                part_number: 1,
+                sha256: sha256_hex(&first),
+                content: first,
+            }),
+        )
+        .await
+        .unwrap();
+        let resumed = DataSourceService::get_multipart_upload(
+            &runtime,
+            Request::new(GetMultipartUploadRequest {
+                upload_id: session.id.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resumed.uploaded_parts, 1);
+        assert_eq!(resumed.uploaded_bytes, MULTIPART_PART_BYTES);
+
+        let last = content[part_size..].to_vec();
+        DataSourceService::upload_multipart_part(
+            &runtime,
+            Request::new(UploadMultipartPartRequest {
+                upload_id: session.id.clone(),
+                part_number: 2,
+                sha256: sha256_hex(&last),
+                content: last,
+            }),
+        )
+        .await
+        .unwrap();
+        let completed = DataSourceService::complete_multipart_upload(
+            &runtime,
+            Request::new(CompleteMultipartUploadRequest {
+                upload_id: session.id.clone(),
+                size_bytes: content.len() as u64,
+                sha256: sha256_hex(&content),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(completed.size_bytes, content.len() as u64);
+        assert_eq!(completed.sha256, sha256_hex(&content));
+        assert_eq!(
+            DataSourceService::get_multipart_upload(
+                &runtime,
+                Request::new(GetMultipartUploadRequest {
+                    upload_id: session.id,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .state,
+            2
+        );
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn imported_graph_is_queryable_only_through_its_ontology_version() {
         let runtime = Runtime::seeded().await;
@@ -4510,6 +5554,11 @@ mod tests {
             created_at: Some(timestamp(Utc::now())),
             started_at: Some(timestamp(Utc::now())),
             completed_at: None,
+            checkpoint_stage: String::new(),
+            checkpoint_nodes: 0,
+            checkpoint_edges: 0,
+            lease_owner: String::new(),
+            lease_expires_at: None,
         };
         runtime
             .jobs
@@ -4522,6 +5571,55 @@ mod tests {
         let completed = wait_for_job(&runtime, job).await;
         assert_eq!(completed.state, IngestionState::Succeeded as i32);
         assert_eq!(completed.nodes_written, 1);
+        assert_eq!(completed.checkpoint_stage, "completed");
+        assert_eq!(completed.checkpoint_nodes, 1);
+        assert!(completed.lease_owner.is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_leases_block_other_replicas_until_expiry() {
+        let runtime = Runtime::seeded().await;
+        let mut competitor = runtime.clone();
+        competitor.instance_id = Arc::new(Uuid::new_v4().to_string());
+        let job = IngestionJob {
+            id: Uuid::new_v4().to_string(),
+            data_source_id: Uuid::new_v4().to_string(),
+            state: IngestionState::Running as i32,
+            rows_read: 0,
+            nodes_written: 0,
+            edges_written: 0,
+            rows_rejected: 0,
+            error: String::new(),
+            ontology_mapping_id: Uuid::new_v4().to_string(),
+            ontology_version_id: Uuid::new_v4().to_string(),
+            workspace_id: dev_workspace_id(),
+            created_at: Some(timestamp(Utc::now())),
+            started_at: Some(timestamp(Utc::now())),
+            completed_at: None,
+            checkpoint_stage: "nodes".into(),
+            checkpoint_nodes: 5_000,
+            checkpoint_edges: 0,
+            lease_owner: (*runtime.instance_id).clone(),
+            lease_expires_at: Some(timestamp(Utc::now() + Duration::minutes(5))),
+        };
+        runtime
+            .jobs
+            .write()
+            .await
+            .insert(job.id.clone(), job.clone());
+
+        assert!(!competitor.acquire_job_lease(&job.id).await.unwrap());
+        runtime
+            .jobs
+            .write()
+            .await
+            .get_mut(&job.id)
+            .unwrap()
+            .lease_expires_at = Some(timestamp(Utc::now() - Duration::seconds(1)));
+        assert!(competitor.acquire_job_lease(&job.id).await.unwrap());
+        let acquired = runtime.jobs.read().await.get(&job.id).cloned().unwrap();
+        assert_eq!(acquired.lease_owner, *competitor.instance_id);
+        assert_eq!(acquired.checkpoint_nodes, 5_000);
     }
 
     #[tokio::test]
@@ -4542,6 +5640,11 @@ mod tests {
             created_at: Some(timestamp(Utc::now())),
             started_at: None,
             completed_at: None,
+            checkpoint_stage: String::new(),
+            checkpoint_nodes: 0,
+            checkpoint_edges: 0,
+            lease_owner: String::new(),
+            lease_expires_at: None,
         };
         runtime
             .jobs
@@ -4615,6 +5718,11 @@ mod tests {
             created_at: Some(timestamp(Utc::now())),
             started_at: Some(timestamp(Utc::now())),
             completed_at: None,
+            checkpoint_stage: String::new(),
+            checkpoint_nodes: 0,
+            checkpoint_edges: 0,
+            lease_owner: String::new(),
+            lease_expires_at: None,
         };
         runtime
             .persist_job(&interrupted)

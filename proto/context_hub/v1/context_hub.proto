@@ -237,6 +237,50 @@ message UploadDataSourceResponse {
   uint64 size_bytes = 3;
   string sha256 = 4;
 }
+message BeginMultipartUploadRequest {
+  string workspace_id = 1;
+  string name = 2;
+  string file_name = 3;
+  SourceFileFormat format = 4;
+  uint64 size_bytes = 5;
+}
+enum MultipartUploadState {
+  MULTIPART_UPLOAD_STATE_UNSPECIFIED = 0;
+  MULTIPART_UPLOAD_STATE_ACTIVE = 1;
+  MULTIPART_UPLOAD_STATE_COMPLETED = 2;
+  MULTIPART_UPLOAD_STATE_ABORTED = 3;
+}
+message MultipartUploadSession {
+  string id = 1;
+  string workspace_id = 2;
+  string name = 3;
+  string file_name = 4;
+  SourceFileFormat format = 5;
+  uint64 size_bytes = 6;
+  uint64 part_size_bytes = 7;
+  uint32 uploaded_parts = 8;
+  uint64 uploaded_bytes = 9;
+  google.protobuf.Timestamp expires_at = 10;
+  MultipartUploadState state = 11;
+}
+message UploadMultipartPartRequest {
+  string upload_id = 1;
+  uint32 part_number = 2;
+  bytes content = 3;
+  string sha256 = 4;
+}
+message UploadMultipartPartResponse {
+  uint32 part_number = 1;
+  uint64 size_bytes = 2;
+  string sha256 = 3;
+}
+message GetMultipartUploadRequest { string upload_id = 1; }
+message CompleteMultipartUploadRequest {
+  string upload_id = 1;
+  uint64 size_bytes = 2;
+  string sha256 = 3;
+}
+message AbortMultipartUploadRequest { string upload_id = 1; }
 message GetUploadDataSourceRequest { string id = 1; }
 message GetUploadDataSourceResponse {
   DataSource data_source = 1;
@@ -273,6 +317,11 @@ service DataSourceService {
   rpc GetUsage(GetDataSourceUsageRequest) returns (GetDataSourceUsageResponse);
   rpc Delete(DeleteDataSourceRequest) returns (google.protobuf.Empty);
   rpc Upload(UploadDataSourceRequest) returns (UploadDataSourceResponse);
+  rpc BeginMultipartUpload(BeginMultipartUploadRequest) returns (MultipartUploadSession);
+  rpc GetMultipartUpload(GetMultipartUploadRequest) returns (MultipartUploadSession);
+  rpc UploadMultipartPart(UploadMultipartPartRequest) returns (UploadMultipartPartResponse);
+  rpc CompleteMultipartUpload(CompleteMultipartUploadRequest) returns (UploadDataSourceResponse);
+  rpc AbortMultipartUpload(AbortMultipartUploadRequest) returns (google.protobuf.Empty);
   rpc GetUpload(GetUploadDataSourceRequest) returns (GetUploadDataSourceResponse);
   rpc Preview(PreviewDataSourceRequest) returns (PreviewDataSourceResponse);
   rpc List(ListDataSourcesRequest) returns (ListDataSourcesResponse);
@@ -304,6 +353,11 @@ message IngestionJob {
   google.protobuf.Timestamp created_at = 12;
   google.protobuf.Timestamp started_at = 13;
   google.protobuf.Timestamp completed_at = 14;
+  string checkpoint_stage = 15;
+  uint64 checkpoint_nodes = 16;
+  uint64 checkpoint_edges = 17;
+  string lease_owner = 18;
+  google.protobuf.Timestamp lease_expires_at = 19;
 }
 message StartIngestionRequest {
   string data_source_id = 1;

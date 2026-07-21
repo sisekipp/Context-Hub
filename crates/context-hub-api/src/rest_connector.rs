@@ -390,15 +390,6 @@ pub(crate) async fn validate_secure_remote(
 fn validated_headers(values: &HashMap<String, String>) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     for (name, value) in values {
-        let normalized = name.to_ascii_lowercase();
-        if matches!(
-            normalized.as_str(),
-            "authorization" | "cookie" | "proxy-authorization" | "x-api-key"
-        ) {
-            return Err(format!(
-                "sensitive header '{name}' requires the future credential envelope"
-            ));
-        }
         let name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|error| format!("header name is invalid: {error}"))?;
         let value = HeaderValue::from_str(value)

@@ -275,9 +275,11 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
     if (!file) return;
     try {
       const isParquet = /\.parquet$/i.test(file.name);
-      let parsed = isParquet ? [] : parseSource(file.name, await file.text());
-      const uploaded = await uploadWorkspaceSource(file);
-      if (isParquet) parsed = parseSource(file.name, new TextDecoder().decode((await previewWorkspaceSource(uploaded.id)).content));
+      const uploaded = await uploadWorkspaceSource(file, (uploadedBytes, totalBytes) => {
+        setMessage(`Uploading ${file.name}: ${Math.round((uploadedBytes / totalBytes) * 100)}%`);
+      });
+      const preview = await previewWorkspaceSource(uploaded.id);
+      const parsed = parseSource(file.name, new TextDecoder().decode(preview.content));
       if (!parsed.length) throw new Error("No object records found");
       onDataSourceLoaded({ id: uploaded.id, fileName: file.name, kind: "upload", records: parsed });
       setMessage(`${parsed.length.toLocaleString("de-DE")} preview records loaded; the original ${isParquet ? "Parquet file" : "file"} is stored in MinIO.`);

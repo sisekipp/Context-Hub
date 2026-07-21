@@ -88,6 +88,33 @@ CREATE TABLE IF NOT EXISTS context_hub.ontology_data_mappings (
 ) ENGINE = ReplacingMergeTree(revision, deleted)
 ORDER BY (workspace_id, ontology_id, data_source_id, id);
 
+CREATE TABLE IF NOT EXISTS context_hub.upload_sessions (
+  id UUID,
+  workspace_id UUID,
+  name String,
+  file_name String,
+  format Enum8('json' = 1, 'ndjson' = 2, 'csv' = 3, 'parquet' = 4),
+  size_bytes UInt64,
+  part_size_bytes UInt64,
+  state Enum8('active' = 1, 'completed' = 2, 'aborted' = 3),
+  revision UInt64,
+  created_at DateTime64(6, 'UTC'),
+  expires_at DateTime64(6, 'UTC')
+) ENGINE = ReplacingMergeTree(revision)
+ORDER BY (workspace_id, id);
+
+CREATE TABLE IF NOT EXISTS context_hub.upload_parts (
+  upload_id UUID,
+  workspace_id UUID,
+  part_number UInt32,
+  object_key String,
+  size_bytes UInt64,
+  sha256 FixedString(64),
+  revision UInt64,
+  uploaded_at DateTime64(6, 'UTC')
+) ENGINE = ReplacingMergeTree(revision)
+ORDER BY (workspace_id, upload_id, part_number);
+
 CREATE TABLE IF NOT EXISTS context_hub.ingestion_jobs (
   id UUID,
   workspace_id UUID,
@@ -101,9 +128,20 @@ CREATE TABLE IF NOT EXISTS context_hub.ingestion_jobs (
   created_at DateTime64(6, 'UTC') DEFAULT now64(6),
   started_at Nullable(DateTime64(6, 'UTC')),
   completed_at Nullable(DateTime64(6, 'UTC')),
+  checkpoint_stage LowCardinality(String) DEFAULT '',
+  checkpoint_nodes UInt64 DEFAULT 0,
+  checkpoint_edges UInt64 DEFAULT 0,
+  lease_owner String DEFAULT '',
+  lease_expires_at Nullable(DateTime64(6, 'UTC')),
   updated_at DateTime64(6, 'UTC') DEFAULT now64(6)
 ) ENGINE = ReplacingMergeTree(revision)
 ORDER BY (workspace_id, id);
+
+ALTER TABLE context_hub.ingestion_jobs ADD COLUMN IF NOT EXISTS checkpoint_stage LowCardinality(String) DEFAULT '';
+ALTER TABLE context_hub.ingestion_jobs ADD COLUMN IF NOT EXISTS checkpoint_nodes UInt64 DEFAULT 0;
+ALTER TABLE context_hub.ingestion_jobs ADD COLUMN IF NOT EXISTS checkpoint_edges UInt64 DEFAULT 0;
+ALTER TABLE context_hub.ingestion_jobs ADD COLUMN IF NOT EXISTS lease_owner String DEFAULT '';
+ALTER TABLE context_hub.ingestion_jobs ADD COLUMN IF NOT EXISTS lease_expires_at Nullable(DateTime64(6, 'UTC'));
 
 CREATE TABLE IF NOT EXISTS context_hub.graph_nodes (
   workspace_id UUID,

@@ -34,4 +34,4 @@ The mapping preview is capped at 20 pages, 8 MiB, and 10,000 returned records. A
 
 The connector shares the REST connector's outbound-network protection: it rejects URL credentials, localhost, private, link-local and reserved IP ranges, mixed public/private DNS answers, cross-host redirects, HTTPS downgrades, and oversized responses. DNS answers are validated and pinned into the request client.
 
-`Authorization`, `Cookie`, `Proxy-Authorization`, and `X-API-Key` cannot be stored in `configuration_json`. They remain disabled until encrypted credential envelopes are implemented.
+`Authorization`, `Cookie`, `Proxy-Authorization`, and `X-API-Key` values are stored in an AES-256-GCM credential envelope separate from the public configuration. The API and UI return only a masked placeholder and preserve an unchanged secret when the source is edited.

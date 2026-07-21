@@ -1,5 +1,6 @@
 import { createClient } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
+import { sha256 } from "@noble/hashes/sha2.js";
 import {
   DataSourceService,
   DataSourceKind,
@@ -10,6 +11,7 @@ import {
   GraphService,
   IngestionService,
   IngestionState,
+  MultipartUploadState,
   OntologyService,
   SourceFileFormat,
   SortDirection,
@@ -120,7 +122,12 @@ function sourceFormat(fileName: string): SourceFileFormat {
   return SourceFileFormat.JSON;
 }
 
-export async function uploadWorkspaceSource(file: File) {
+function hex(bytes: Uint8Array) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export async function uploadWorkspaceSource(file: File, onProgress?: (uploadedBytes: number, totalBytes: number) => void) {
+  if (file.size > 32 * 1024 * 1024) return uploadWorkspaceSourceMultipart(file, onProgress);
   const response = await dataSources.upload({
     workspaceId: DEV_WORKSPACE_ID,
     name: file.name.replace(/\.[^.]+$/, "") || file.name,
@@ -128,6 +135,60 @@ export async function uploadWorkspaceSource(file: File) {
     format: sourceFormat(file.name),
     content: new Uint8Array(await file.arrayBuffer()),
   });
+  if (!response.dataSource) throw new Error("The backend did not return a data source.");
+  return {
+    id: response.dataSource.id,
+    objectKey: response.objectKey,
+    sizeBytes: response.sizeBytes,
+    sha256: response.sha256,
+  };
+}
+
+async function uploadWorkspaceSourceMultipart(file: File, onProgress?: (uploadedBytes: number, totalBytes: number) => void) {
+  const resumeKey = `context-hub.multipart.${file.name}:${file.size}:${file.lastModified}`;
+  let session = null;
+  const savedId = localStorage.getItem(resumeKey);
+  if (savedId) {
+    try {
+      const candidate = await dataSources.getMultipartUpload({ uploadId: savedId });
+      if (candidate.state === MultipartUploadState.ACTIVE && Number(candidate.sizeBytes) === file.size && candidate.fileName === file.name) session = candidate;
+    } catch {
+      localStorage.removeItem(resumeKey);
+    }
+  }
+  if (!session) {
+    session = await dataSources.beginMultipartUpload({
+      workspaceId: DEV_WORKSPACE_ID,
+      name: file.name.replace(/\.[^.]+$/, "") || file.name,
+      fileName: file.name,
+      format: sourceFormat(file.name),
+      sizeBytes: BigInt(file.size),
+    });
+    localStorage.setItem(resumeKey, session.id);
+  }
+  const partSize = Number(session.partSizeBytes);
+  const partCount = Math.ceil(file.size / partSize);
+  const digest = sha256.create();
+  for (let index = 0; index < partCount; index += 1) {
+    const start = index * partSize;
+    const content = new Uint8Array(await file.slice(start, Math.min(start + partSize, file.size)).arrayBuffer());
+    digest.update(content);
+    if (index >= session.uploadedParts) {
+      await dataSources.uploadMultipartPart({
+        uploadId: session.id,
+        partNumber: index + 1,
+        content,
+        sha256: hex(sha256(content)),
+      });
+    }
+    onProgress?.(Math.min(start + content.byteLength, file.size), file.size);
+  }
+  const response = await dataSources.completeMultipartUpload({
+    uploadId: session.id,
+    sizeBytes: BigInt(file.size),
+    sha256: hex(digest.digest()),
+  });
+  localStorage.removeItem(resumeKey);
   if (!response.dataSource) throw new Error("The backend did not return a data source.");
   return {
     id: response.dataSource.id,
