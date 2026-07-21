@@ -25,7 +25,26 @@ const ingestions = createClient(IngestionService, transport);
 const graph = createClient(GraphService, transport);
 
 export type BackendOntology = { id: string; name: string; slug: string; activeVersionId: string };
-export type BackendDataSource = { id: string; name: string; fileName: string };
+export type BackendDataSource = { id: string; name: string; fileName: string; kind: "upload" | "rest" };
+export type RestKeyValue = { key: string; value: string };
+export type RestSourceInput = {
+  name: string;
+  url: string;
+  recordPath: string;
+  headers: RestKeyValue[];
+  query: RestKeyValue[];
+  pagination: "none" | "page" | "cursor";
+  pageParameter: string;
+  pageStart: number;
+  pageSizeParameter: string;
+  pageSize: number;
+  cursorParameter: string;
+  nextCursorPath: string;
+  maxPages: number;
+  maxBytes: number;
+  timeoutSeconds: number;
+  retryAttempts: number;
+};
 
 export type BackendFieldMapping = {
   sourceField: string;
@@ -73,15 +92,67 @@ export async function uploadWorkspaceSource(file: File) {
 
 export async function listWorkspaceDataSources(): Promise<BackendDataSource[]> {
   const response = await dataSources.list({ workspaceId: DEV_WORKSPACE_ID });
-  return response.dataSources.flatMap((source) => {
+  return response.dataSources.flatMap<BackendDataSource>((source) => {
+    if (source.kind === DataSourceKind.REST) {
+      return [{ id: source.id, name: source.name, fileName: `REST · ${source.name}.json`, kind: "rest" as const }];
+    }
     if (source.kind !== DataSourceKind.UPLOAD) return [];
     try {
       const configuration = JSON.parse(source.configurationJson) as { file_name?: string };
-      return [{ id: source.id, name: source.name, fileName: configuration.file_name || source.name }];
+      return [{ id: source.id, name: source.name, fileName: configuration.file_name || source.name, kind: "upload" as const }];
     } catch {
-      return [{ id: source.id, name: source.name, fileName: source.name }];
+      return [{ id: source.id, name: source.name, fileName: source.name, kind: "upload" as const }];
     }
   });
+}
+
+function keyValues(items: RestKeyValue[]) {
+  return Object.fromEntries(items.filter((item) => item.key.trim()).map((item) => [item.key.trim(), item.value]));
+}
+
+export async function saveWorkspaceRestSource(input: RestSourceInput) {
+  const pagination = input.pagination === "page" ? {
+    mode: "page",
+    parameter: input.pageParameter,
+    start: input.pageStart,
+    page_size_parameter: input.pageSizeParameter || null,
+    page_size: input.pageSizeParameter ? input.pageSize : null,
+    stop_on_short_page: true,
+  } : input.pagination === "cursor" ? {
+    mode: "cursor",
+    query_parameter: input.cursorParameter,
+    next_cursor_path: input.nextCursorPath,
+    initial_cursor: null,
+  } : { mode: "none" };
+  const source = await dataSources.save({ dataSource: {
+    id: "",
+    workspaceId: DEV_WORKSPACE_ID,
+    name: input.name,
+    kind: DataSourceKind.REST,
+    configurationJson: JSON.stringify({
+      url: input.url,
+      headers: keyValues(input.headers),
+      query: keyValues(input.query),
+      record_path: input.recordPath || null,
+      pagination,
+      max_pages: input.maxPages,
+      max_bytes: input.maxBytes,
+      timeout_seconds: input.timeoutSeconds,
+      retry_attempts: input.retryAttempts,
+    }),
+  } });
+  return { id: source.id, name: source.name, fileName: `REST · ${source.name}.json`, kind: "rest" as const };
+}
+
+export async function previewWorkspaceSource(id: string) {
+  const response = await dataSources.preview({ id });
+  if (!response.dataSource) throw new Error("The backend did not return the requested data source.");
+  return {
+    id: response.dataSource.id,
+    fileName: `REST · ${response.dataSource.name}.json`,
+    content: response.content,
+    recordCount: Number(response.recordCount),
+  };
 }
 
 export async function downloadWorkspaceSource(id: string) {

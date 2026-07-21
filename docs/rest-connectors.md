@@ -2,6 +2,8 @@
 
 REST sources use `DataSource.kind = DATA_SOURCE_KIND_REST`. Their `configuration_json` follows this shape:
 
+In the web app, open **Data mapping → REST source** to create this configuration without writing JSON manually. The form saves the source workspace-wide and immediately requests a bounded backend preview for schema detection. The preview is limited to 20 pages, 8 MiB, and 10,000 returned records; an ingestion job still uses the source's configured production limits.
+
 ```json
 {
   "url": "https://api.example.com/services",

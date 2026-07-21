@@ -10,11 +10,11 @@ use context_hub_api::context_hub::v1::{
     IngestionState, ListDataSourcesRequest, ListDataSourcesResponse, ListOntologiesRequest,
     ListOntologiesResponse, ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse,
     ListOntologyVersionsRequest, ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology,
-    OntologyDataMapping, OntologyDraft, OntologyVersion, PublishOntologyRequest,
-    QueryGraphResponse, SaveDataSourceRequest, SaveOntologyDataMappingRequest,
-    SaveOntologyDraftRequest, StartIngestionRequest, UploadDataSourceRequest,
-    UploadDataSourceResponse, ValidateOntologyRequest, ValidateOntologyResponse, ValidationIssue,
-    Workspace,
+    OntologyDataMapping, OntologyDraft, OntologyVersion, PreviewDataSourceRequest,
+    PreviewDataSourceResponse, PublishOntologyRequest, QueryGraphResponse, SaveDataSourceRequest,
+    SaveOntologyDataMappingRequest, SaveOntologyDraftRequest, StartIngestionRequest,
+    UploadDataSourceRequest, UploadDataSourceResponse, ValidateOntologyRequest,
+    ValidateOntologyResponse, ValidationIssue, Workspace,
     data_source_service_server::{DataSourceService, DataSourceServiceServer},
     graph_service_server::{GraphService, GraphServiceServer},
     ingestion_service_server::{IngestionService, IngestionServiceServer},
@@ -74,6 +74,8 @@ struct UploadSourceConfiguration {
 }
 
 const MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
+const MAX_REST_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REST_PREVIEW_RECORDS: usize = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GraphCursor {
@@ -1027,6 +1029,50 @@ impl DataSourceService for Runtime {
             format: proto_source_format(configuration.format),
             content,
             sha256: configuration.sha256,
+        }))
+    }
+
+    async fn preview(
+        &self,
+        request: Request<PreviewDataSourceRequest>,
+    ) -> Result<Response<PreviewDataSourceResponse>, Status> {
+        let id = request.into_inner().id;
+        let source = self
+            .data_sources
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("data source not found"))?;
+        if source.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        if source.kind != 2 {
+            return Err(Status::failed_precondition(
+                "preview currently supports REST data sources",
+            ));
+        }
+        let mut configuration: RestSourceConfiguration =
+            serde_json::from_str(&source.configuration_json).map_err(|error| {
+                Status::failed_precondition(format!(
+                    "REST source configuration is invalid: {error}"
+                ))
+            })?;
+        configuration.max_bytes = configuration.max_bytes.min(MAX_REST_PREVIEW_BYTES);
+        configuration.max_pages = configuration.max_pages.min(20);
+        let content = fetch_rest_source(&configuration)
+            .await
+            .map_err(Status::failed_precondition)?;
+        let mut records: Vec<serde_json::Value> = serde_json::from_slice(&content)
+            .map_err(|error| Status::internal(format!("REST preview is invalid: {error}")))?;
+        records.truncate(MAX_REST_PREVIEW_RECORDS);
+        let record_count = records.len() as u64;
+        let content = serde_json::to_vec(&records)
+            .map_err(|error| Status::internal(format!("REST preview failed: {error}")))?;
+        Ok(Response::new(PreviewDataSourceResponse {
+            data_source: Some(source),
+            content,
+            record_count,
         }))
     }
 

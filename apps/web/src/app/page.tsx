@@ -7,7 +7,7 @@ import { MappingPanel, parseSource, type BrowserDataSource } from "@/components/
 import { OntologyEditor } from "@/components/ontology-editor";
 import { emptyGraph, type ImportedGraph } from "@/lib/graph-data";
 import { defaultOntologyCatalog, type OntologyCatalog } from "@/lib/ontology-catalog";
-import { createWorkspaceOntology, downloadWorkspaceSource, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph } from "@/lib/context-hub-client";
+import { createWorkspaceOntology, downloadWorkspaceSource, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph, previewWorkspaceSource } from "@/lib/context-hub-client";
 
 type Section = "ontology" | "mapping" | "graph";
 type OntologyWorkspace = { id: string; name: string; slug: string; activeVersionId: string };
@@ -106,7 +106,7 @@ export default function Home() {
     void listWorkspaceDataSources()
       .then((sources) => {
         if (cancelled) return;
-        setDataSources(sources.map((source) => ({ id: source.id, fileName: source.fileName, records: [] })));
+        setDataSources(sources.map((source) => ({ id: source.id, fileName: source.fileName, kind: source.kind, records: [] })));
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
@@ -152,11 +152,12 @@ export default function Home() {
       return;
     }
     try {
-      const downloaded = await downloadWorkspaceSource(id);
-      const hydrated = {
-        id: downloaded.id,
-        fileName: downloaded.fileName,
-        records: parseSource(downloaded.fileName, new TextDecoder().decode(downloaded.content)),
+      const content = existing?.kind === "rest" ? await previewWorkspaceSource(id) : await downloadWorkspaceSource(id);
+      const hydrated: BrowserDataSource = {
+        id: content.id,
+        fileName: content.fileName,
+        kind: existing?.kind ?? "upload",
+        records: parseSource(content.fileName, new TextDecoder().decode(content.content)),
       };
       setDataSources((items) => items.map((source) => source.id === id ? hydrated : source));
       setActiveDataSourceId(id);
@@ -184,7 +185,7 @@ export default function Home() {
         <div className="brand"><span className="brand-mark"><Boxes size={19} /></span><span>ContextHub</span></div>
         <div className="workspace-card"><span className="eyebrow">Workspace</span><strong>Development</strong><span className="status"><i /> Connected</span></div>
         <div className="ontology-switcher"><div><span className="eyebrow">Ontology</span><button onClick={createOntology} title="Create ontology" aria-label="Create ontology"><Plus size={13}/></button></div><select aria-label="Active ontology" value={activeOntology.id} onChange={(event) => { saveRegistry({ ontologies, activeOntologyId: event.target.value }); setSection("ontology"); }}>{ontologies.map((ontology) => <option value={ontology.id} key={ontology.id}>{ontology.name}</option>)}</select><small>{ontologies.length} {ontologies.length === 1 ? "ontology" : "ontologies"} · shared data sources</small></div>
-        <div className="ontology-switcher source-switcher"><div><span className="eyebrow">Workspace source</span><DatabaseZap size={13}/></div><select aria-label="Active data source" value={activeDataSourceId} disabled={!dataSources.length} onChange={(event) => void selectDataSource(event.target.value)}><option value="">{dataSources.length ? "Select source" : "Load a file in Data mapping"}</option>{dataSources.map((source) => <option value={source.id} key={source.id}>{source.fileName}</option>)}</select><small>{dataSources.length ? "Persisted in ClickHouse · files in MinIO" : "Sources are shared; mappings stay isolated"}</small></div>
+        <div className="ontology-switcher source-switcher"><div><span className="eyebrow">Workspace source</span><DatabaseZap size={13}/></div><select aria-label="Active data source" value={activeDataSourceId} disabled={!dataSources.length} onChange={(event) => void selectDataSource(event.target.value)}><option value="">{dataSources.length ? "Select source" : "Add a file or REST source"}</option>{dataSources.map((source) => <option value={source.id} key={source.id}>{source.fileName}</option>)}</select><small>{dataSources.length ? "Shared sources · ontology-specific mappings" : "Sources are shared; mappings stay isolated"}</small></div>
         <nav aria-label="Main navigation">
           {sections.map(({ id, label, icon: Icon }) => (
             <button className={section === id ? "nav-item active" : "nav-item"} key={id} onClick={() => setSection(id)}>

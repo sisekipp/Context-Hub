@@ -135,6 +135,12 @@ message GetUploadDataSourceResponse {
   bytes content = 4;
   string sha256 = 5;
 }
+message PreviewDataSourceRequest { string id = 1; }
+message PreviewDataSourceResponse {
+  DataSource data_source = 1;
+  bytes content = 2;
+  uint64 record_count = 3;
+}
 
 message OntologyDataMapping {
   string id = 1;
@@ -156,6 +162,7 @@ service DataSourceService {
   rpc Save(SaveDataSourceRequest) returns (DataSource);
   rpc Upload(UploadDataSourceRequest) returns (UploadDataSourceResponse);
   rpc GetUpload(GetUploadDataSourceRequest) returns (GetUploadDataSourceResponse);
+  rpc Preview(PreviewDataSourceRequest) returns (PreviewDataSourceResponse);
   rpc List(ListDataSourcesRequest) returns (ListDataSourcesResponse);
   rpc SaveMapping(SaveOntologyDataMappingRequest) returns (OntologyDataMapping);
   rpc ListMappings(ListOntologyDataMappingsRequest) returns (ListOntologyDataMappingsResponse);
