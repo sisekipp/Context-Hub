@@ -262,7 +262,7 @@ button { color: inherit; }
 .source-summary strong { font-size: 22px; }
 .source-summary span { color: var(--muted); font-size: 9px; text-transform: uppercase; }
 .source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; max-width: 1180px; margin: auto; }
-.source-card { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 12px; padding: 14px; border: 1px solid #273248; border-radius: 12px; background: #101722e8; box-shadow: 0 16px 45px #0003; }
+.source-manager .source-card { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 12px; padding: 14px; border: 1px solid #273248; border-radius: 12px; background: #101722e8; box-shadow: 0 16px 45px #0003; }
 .source-kind { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 9px; color: #aebdff; background: #202d51; }
 .source-kind.rest { color: #86e1c7; background: #15352e; }
 .source-kind.graphql { color: #ed9bd3; background: #3a1d32; }

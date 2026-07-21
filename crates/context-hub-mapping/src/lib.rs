@@ -573,8 +573,9 @@ fn normalize_json_path(path: &Path) -> Result<tempfile::NamedTempFile, MappingEr
                 _ => {}
             }
             if depth == 0 {
-                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&record)?;
-                writer.write_all(&record)?;
+                let object =
+                    serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&record)?;
+                serde_json::to_writer(&mut writer, &object)?;
                 writer.write_all(b"\n")?;
                 record.clear();
             }
@@ -1261,6 +1262,29 @@ mod tests {
         assert_eq!(mapped.rows_read, 9_000);
         assert_eq!(mapped.nodes.len(), 9_000);
         assert_eq!(mapped.nodes[8_999].object_id, "service:service-8999");
+    }
+
+    #[tokio::test]
+    async fn streams_pretty_json_arrays_with_nested_values() {
+        let mut source = tempfile::NamedTempFile::new().unwrap();
+        source
+            .write_all(
+                br#"[
+  {
+    "id": "service-1",
+    "name": "Checkout Gateway",
+    "depends_on": ["service-2", "service-3"],
+    "metadata": { "tier": "critical" }
+  }
+]"#,
+            )
+            .unwrap();
+        source.flush().unwrap();
+
+        let preview = preview_source_records_path(SourceFormat::Json, source.path(), 1).unwrap();
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0]["name"], "Checkout Gateway");
+        assert_eq!(preview[0]["depends_on"][0], "service-2");
     }
 
     #[test]

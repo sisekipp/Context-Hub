@@ -253,7 +253,7 @@ export default function Home() {
           onChanged={refreshDataSources}
           onUseForMapping={(id) => { void selectDataSource(id); setSection("mapping"); }}
         />}
-        {section === "mapping" && <MappingPanel key={`${activeOntology.id}:${activeDataSource?.id ?? "new"}`} ontologyId={activeOntology.id} ontologyName={activeOntology.name} ontologySlug={activeOntology.slug} ontology={activeCatalog} dataSource={activeDataSource} onDataSourceLoaded={registerDataSource} onImport={(imported) => { setGraphs((items) => ({ ...items, [activeOntology.id]: imported })); setSection("graph"); }} />}
+        {section === "mapping" && <MappingPanel key={`${activeOntology.id}:${activeDataSource?.id ?? "new"}`} ontologyId={activeOntology.id} ontologyName={activeOntology.name} ontologySlug={activeOntology.slug} ontology={activeCatalog} dataSource={activeDataSource} onDataSourceLoaded={registerDataSource} onImport={(imported, versionId) => { recordPublishedVersion(versionId); setGraphs((items) => ({ ...items, [activeOntology.id]: imported })); setSection("graph"); }} />}
         {section === "imports" && <ImportHistory
           ontologyId={activeOntology.id}
           sources={backendDataSources}

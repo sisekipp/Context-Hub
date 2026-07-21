@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ContextHub MCP for AI</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body {
+      display: grid;
+      place-items: center;
+      color: #f4f7ff;
+      background:
+        radial-gradient(circle at 18% 18%, #25366d88 0, transparent 35%),
+        radial-gradient(circle at 82% 74%, #19564d66 0, transparent 34%),
+        #070b12;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { width: 1180px; }
+    header { margin-bottom: 42px; text-align: center; }
+    .eyebrow { color: #85a2ff; font-size: 13px; font-weight: 800; letter-spacing: .24em; text-transform: uppercase; }
+    h1 { margin: 12px 0 10px; font-size: 46px; letter-spacing: -.04em; }
+    header p { margin: 0; color: #aebbd0; font-size: 18px; }
+    .flow { display: grid; grid-template-columns: 1fr 180px 1fr; align-items: stretch; }
+    .card {
+      min-height: 330px;
+      padding: 30px;
+      border: 1px solid #33415d;
+      border-radius: 22px;
+      background: linear-gradient(145deg, #121a29ee, #0b111bee);
+      box-shadow: 0 28px 80px #0008;
+    }
+    .card-title { display: flex; align-items: center; gap: 13px; margin-bottom: 24px; }
+    .icon { display: grid; width: 46px; height: 46px; place-items: center; border-radius: 13px; color: #dbe4ff; background: #304a96; font-size: 22px; }
+    .ai .icon { background: #176756; }
+    h2 { margin: 0; font-size: 25px; }
+    .card-title span { display: block; margin-top: 3px; color: #7f90ab; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .ontology { position: relative; height: 210px; }
+    .node { position: absolute; min-width: 120px; padding: 13px 16px; border: 1px solid #4f6090; border-radius: 12px; background: #18223a; box-shadow: 0 10px 24px #0005; }
+    .node strong { display: block; font-size: 15px; }
+    .node small { color: #8fa0bb; }
+    .service { top: 15px; left: 12px; }
+    .team { top: 125px; left: 210px; border-color: #327967; background: #132d29; }
+    .data { top: 18px; right: 0; border-color: #79519b; background: #2a1c3a; }
+    .edge { position: absolute; height: 2px; transform-origin: left; background: linear-gradient(90deg, #7e9cff, #5ed3b5); }
+    .edge.one { top: 76px; left: 138px; width: 175px; transform: rotate(-2deg); }
+    .edge.two { top: 98px; left: 105px; width: 190px; transform: rotate(31deg); }
+    .edge.three { top: 132px; left: 293px; width: 114px; transform: rotate(-54deg); }
+    .mcp { display: flex; align-items: center; justify-content: center; }
+    .mcp-line { position: relative; width: 100%; height: 3px; background: linear-gradient(90deg, #6687ff, #5ed3b5); box-shadow: 0 0 18px #7597ff99; }
+    .mcp-line::after { position: absolute; top: -6px; right: -1px; width: 14px; height: 14px; border-top: 3px solid #5ed3b5; border-right: 3px solid #5ed3b5; content: ""; transform: rotate(45deg); }
+    .mcp-badge { position: absolute; left: 50%; padding: 10px 15px; border: 1px solid #5972ad; border-radius: 999px; color: #dfe7ff; background: #101827; font: 800 13px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; transform: translate(-50%, -50%); }
+    ul { display: grid; gap: 14px; margin: 15px 0 0; padding: 0; list-style: none; }
+    li { display: flex; align-items: center; gap: 11px; padding: 13px 15px; border: 1px solid #26354a; border-radius: 11px; color: #cbd5e7; background: #0c131f; font-size: 15px; }
+    li::before { display: grid; width: 22px; height: 22px; flex: none; place-items: center; border-radius: 50%; color: #9ff1da; background: #174137; content: "✓"; font-size: 12px; font-weight: 900; }
+    footer { margin-top: 35px; color: #96a5bc; text-align: center; font-size: 17px; }
+    footer strong { color: #eef2ff; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">AI-ready organizational context</div>
+      <h1>Give AI a shared understanding of your world</h1>
+      <p>Ontology, connected data, and business meaning — securely available through MCP.</p>
+    </header>
+    <section class="flow">
+      <article class="card">
+        <div class="card-title"><div class="icon">⬡</div><div><h2>ContextHub</h2><span>ontology + knowledge graph</span></div></div>
+        <div class="ontology">
+          <div class="edge one"></div><div class="edge two"></div><div class="edge three"></div>
+          <div class="node service"><strong>Service</strong><small>Checkout Gateway</small></div>
+          <div class="node team"><strong>Team</strong><small>Atlas Platform</small></div>
+          <div class="node data"><strong>Dependencies</strong><small>576 relationships</small></div>
+        </div>
+      </article>
+      <div class="mcp"><div class="mcp-line"><span class="mcp-badge">MCP</span></div></div>
+      <article class="card ai">
+        <div class="card-title"><div class="icon">✦</div><div><h2>AI Agents</h2><span>grounded, context-aware reasoning</span></div></div>
+        <ul>
+          <li>Understand objects and relationships</li>
+          <li>Search and traverse trusted graph data</li>
+          <li>Produce more accurate, grounded answers</li>
+          <li>Use read-only tools with clear boundaries</li>
+        </ul>
+      </article>
+    </section>
+    <footer><strong>ContextHub</strong> turns organizational knowledge into AI-ready context.</footer>
+  </main>
+</body>
+</html>

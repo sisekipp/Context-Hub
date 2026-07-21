@@ -1,0 +1,4034 @@
+[
+  {
+    "service_id": "svc-001",
+    "service_name": "Checkout Gateway",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-009",
+      "svc-017",
+      "svc-025"
+    ],
+    "domain": "Checkout",
+    "runtime": "Rust",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "critical",
+    "health": "degraded",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 850,
+    "requests_per_minute": 1500,
+    "error_rate": 0,
+    "repository": "nova-commerce/checkout-svc-001",
+    "description": "Checkout Gateway is operated by Atlas Platform and runs in eu-central-1.",
+    "tags": [
+      "checkout",
+      "critical",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-002",
+    "service_name": "Payment Orchestrator",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-010",
+      "svc-018",
+      "svc-026"
+    ],
+    "domain": "Identity",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 1827,
+    "requests_per_minute": 9419,
+    "error_rate": 0.0017,
+    "repository": "nova-commerce/identity-svc-002",
+    "description": "Payment Orchestrator is operated by Aurora Experience and runs in eu-west-1.",
+    "tags": [
+      "identity",
+      "critical",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-003",
+    "service_name": "Fraud Signal Engine",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-011",
+      "svc-019",
+      "svc-027"
+    ],
+    "domain": "Catalog",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 2804,
+    "requests_per_minute": 17338,
+    "error_rate": 0.0034,
+    "repository": "nova-commerce/catalog-svc-003",
+    "description": "Fraud Signal Engine is operated by Beacon Reliability and runs in us-east-1.",
+    "tags": [
+      "catalog",
+      "critical",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-004",
+    "service_name": "Customer Identity",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-012",
+      "svc-020",
+      "svc-028"
+    ],
+    "domain": "Payments",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 3781,
+    "requests_per_minute": 25257,
+    "error_rate": 0.0051,
+    "repository": "nova-commerce/payments-svc-004",
+    "description": "Customer Identity is operated by Comet Data and runs in eu-central-1.",
+    "tags": [
+      "payments",
+      "critical",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-005",
+    "service_name": "Product Galaxy",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-013",
+      "svc-021",
+      "svc-029"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 4758,
+    "requests_per_minute": 33176,
+    "error_rate": 0.0068,
+    "repository": "nova-commerce/fulfillment-svc-005",
+    "description": "Product Galaxy is operated by Forge Payments and runs in eu-west-1.",
+    "tags": [
+      "fulfillment",
+      "critical",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-006",
+    "service_name": "Order Conductor",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-014",
+      "svc-022",
+      "svc-030"
+    ],
+    "domain": "Observability",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 5735,
+    "requests_per_minute": 41095,
+    "error_rate": 0.001,
+    "repository": "nova-commerce/observability-svc-006",
+    "description": "Order Conductor is operated by Helix Identity and runs in us-east-1.",
+    "tags": [
+      "observability",
+      "critical",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-007",
+    "service_name": "Inventory Pulse",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-015",
+      "svc-023",
+      "svc-031"
+    ],
+    "domain": "Customer",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 6712,
+    "requests_per_minute": 49014,
+    "error_rate": 0.0027,
+    "repository": "nova-commerce/customer-svc-007",
+    "description": "Inventory Pulse is operated by Nimbus Fulfillment and runs in eu-central-1.",
+    "tags": [
+      "customer",
+      "critical",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-008",
+    "service_name": "Delivery Navigator",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-016",
+      "svc-024",
+      "svc-032"
+    ],
+    "domain": "Analytics",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 7689,
+    "requests_per_minute": 56933,
+    "error_rate": 0.0044,
+    "repository": "nova-commerce/analytics-svc-008",
+    "description": "Delivery Navigator is operated by Pulse Growth and runs in eu-west-1.",
+    "tags": [
+      "analytics",
+      "critical",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-009",
+    "service_name": "Merchant Portal",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-010",
+      "svc-015",
+      "svc-021"
+    ],
+    "domain": "Checkout",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 8666,
+    "requests_per_minute": 64852,
+    "error_rate": 0.0061,
+    "repository": "nova-commerce/checkout-svc-009",
+    "description": "Merchant Portal is operated by Atlas Platform and runs in us-east-1.",
+    "tags": [
+      "checkout",
+      "critical",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-010",
+    "service_name": "Pricing Studio",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-011",
+      "svc-017",
+      "svc-023"
+    ],
+    "domain": "Identity",
+    "runtime": "Kotlin",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 9643,
+    "requests_per_minute": 72771,
+    "error_rate": 0.0003,
+    "repository": "nova-commerce/identity-svc-010",
+    "description": "Pricing Studio is operated by Aurora Experience and runs in eu-central-1.",
+    "tags": [
+      "identity",
+      "critical",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-011",
+    "service_name": "Event Horizon",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-012",
+      "svc-014",
+      "svc-025"
+    ],
+    "domain": "Catalog",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 10620,
+    "requests_per_minute": 80690,
+    "error_rate": 0.002,
+    "repository": "nova-commerce/catalog-svc-011",
+    "description": "Event Horizon is operated by Beacon Reliability and runs in eu-west-1.",
+    "tags": [
+      "catalog",
+      "critical",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-012",
+    "service_name": "Telemetry Core",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-013",
+      "svc-016",
+      "svc-027"
+    ],
+    "domain": "Payments",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "critical",
+    "health": "healthy",
+    "sla_percent": 99.99,
+    "monthly_cost_eur": 11597,
+    "requests_per_minute": 88609,
+    "error_rate": 0.0037,
+    "repository": "nova-commerce/payments-svc-012",
+    "description": "Telemetry Core is operated by Comet Data and runs in us-east-1.",
+    "tags": [
+      "payments",
+      "critical",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-013",
+    "service_name": "Recommendation Lab",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-014",
+      "svc-018",
+      "svc-029"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 12574,
+    "requests_per_minute": 96528,
+    "error_rate": 0.0054,
+    "repository": "nova-commerce/fulfillment-svc-013",
+    "description": "Recommendation Lab is operated by Forge Payments and runs in eu-central-1.",
+    "tags": [
+      "fulfillment",
+      "high",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-014",
+    "service_name": "Loyalty Engine",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-015",
+      "svc-020",
+      "svc-031"
+    ],
+    "domain": "Observability",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 13551,
+    "requests_per_minute": 104447,
+    "error_rate": 0.0071,
+    "repository": "nova-commerce/observability-svc-014",
+    "description": "Loyalty Engine is operated by Helix Identity and runs in eu-west-1.",
+    "tags": [
+      "observability",
+      "high",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-015",
+    "service_name": "Revenue Intelligence",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-016",
+      "svc-022",
+      "svc-026"
+    ],
+    "domain": "Customer",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 14528,
+    "requests_per_minute": 112366,
+    "error_rate": 0.0013,
+    "repository": "nova-commerce/customer-svc-015",
+    "description": "Revenue Intelligence is operated by Nimbus Fulfillment and runs in us-east-1.",
+    "tags": [
+      "customer",
+      "high",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-016",
+    "service_name": "Search Nebula",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-017",
+      "svc-019",
+      "svc-028"
+    ],
+    "domain": "Analytics",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 15505,
+    "requests_per_minute": 120285,
+    "error_rate": 0.003,
+    "repository": "nova-commerce/analytics-svc-016",
+    "description": "Search Nebula is operated by Pulse Growth and runs in eu-central-1.",
+    "tags": [
+      "analytics",
+      "high",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-017",
+    "service_name": "Edge Router",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-018",
+      "svc-021",
+      "svc-030"
+    ],
+    "domain": "Checkout",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 16482,
+    "requests_per_minute": 128204,
+    "error_rate": 0.0047,
+    "repository": "nova-commerce/checkout-svc-017",
+    "description": "Edge Router is operated by Atlas Platform and runs in eu-west-1.",
+    "tags": [
+      "checkout",
+      "high",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-018",
+    "service_name": "Notification Relay",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-019",
+      "svc-023",
+      "svc-032"
+    ],
+    "domain": "Identity",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 17459,
+    "requests_per_minute": 136123,
+    "error_rate": 0.0064,
+    "repository": "nova-commerce/identity-svc-018",
+    "description": "Notification Relay is operated by Aurora Experience and runs in us-east-1.",
+    "tags": [
+      "identity",
+      "high",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-019",
+    "service_name": "Data Lake Bridge",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-020",
+      "svc-025",
+      "svc-034"
+    ],
+    "domain": "Catalog",
+    "runtime": "Rust",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 18436,
+    "requests_per_minute": 144042,
+    "error_rate": 0.0006,
+    "repository": "nova-commerce/catalog-svc-019",
+    "description": "Data Lake Bridge is operated by Beacon Reliability and runs in eu-central-1.",
+    "tags": [
+      "catalog",
+      "high",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-020",
+    "service_name": "Feature Control Plane",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-021",
+      "svc-027",
+      "svc-036"
+    ],
+    "domain": "Payments",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 19413,
+    "requests_per_minute": 151961,
+    "error_rate": 0.0023,
+    "repository": "nova-commerce/payments-svc-020",
+    "description": "Feature Control Plane is operated by Comet Data and runs in eu-west-1.",
+    "tags": [
+      "payments",
+      "high",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-021",
+    "service_name": "Secrets Guardian",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-022",
+      "svc-024",
+      "svc-038"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 20390,
+    "requests_per_minute": 159880,
+    "error_rate": 0.004,
+    "repository": "nova-commerce/fulfillment-svc-021",
+    "description": "Secrets Guardian is operated by Forge Payments and runs in us-east-1.",
+    "tags": [
+      "fulfillment",
+      "high",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-022",
+    "service_name": "Audit Stream",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-023",
+      "svc-026",
+      "svc-033"
+    ],
+    "domain": "Observability",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 21367,
+    "requests_per_minute": 167799,
+    "error_rate": 0.0057,
+    "repository": "nova-commerce/observability-svc-022",
+    "description": "Audit Stream is operated by Helix Identity and runs in eu-central-1.",
+    "tags": [
+      "observability",
+      "high",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-023",
+    "service_name": "Support Copilot",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-024",
+      "svc-028",
+      "svc-035"
+    ],
+    "domain": "Customer",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 22344,
+    "requests_per_minute": 175718,
+    "error_rate": 0.0074,
+    "repository": "nova-commerce/customer-svc-023",
+    "description": "Support Copilot is operated by Nimbus Fulfillment and runs in eu-west-1.",
+    "tags": [
+      "customer",
+      "high",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-024",
+    "service_name": "Experiment Engine",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-025",
+      "svc-030",
+      "svc-037"
+    ],
+    "domain": "Analytics",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 23321,
+    "requests_per_minute": 183637,
+    "error_rate": 0.0016,
+    "repository": "nova-commerce/analytics-svc-024",
+    "description": "Experiment Engine is operated by Pulse Growth and runs in us-east-1.",
+    "tags": [
+      "analytics",
+      "high",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-025",
+    "service_name": "Checkout Service 025",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-026",
+      "svc-032",
+      "svc-039"
+    ],
+    "domain": "Checkout",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 24298,
+    "requests_per_minute": 191556,
+    "error_rate": 0.0033,
+    "repository": "nova-commerce/checkout-svc-025",
+    "description": "Checkout service 025 is operated by Atlas Platform and runs in eu-central-1.",
+    "tags": [
+      "checkout",
+      "high",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-026",
+    "service_name": "Identity Service 026",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-027",
+      "svc-029",
+      "svc-041"
+    ],
+    "domain": "Identity",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 25275,
+    "requests_per_minute": 199475,
+    "error_rate": 0.005,
+    "repository": "nova-commerce/identity-svc-026",
+    "description": "Identity service 026 is operated by Aurora Experience and runs in eu-west-1.",
+    "tags": [
+      "identity",
+      "high",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-027",
+    "service_name": "Catalog Service 027",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-028",
+      "svc-031",
+      "svc-043"
+    ],
+    "domain": "Catalog",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 26252,
+    "requests_per_minute": 207394,
+    "error_rate": 0.0067,
+    "repository": "nova-commerce/catalog-svc-027",
+    "description": "Catalog service 027 is operated by Beacon Reliability and runs in us-east-1.",
+    "tags": [
+      "catalog",
+      "high",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-028",
+    "service_name": "Payments Service 028",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-029",
+      "svc-033",
+      "svc-045"
+    ],
+    "domain": "Payments",
+    "runtime": "Kotlin",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 27229,
+    "requests_per_minute": 215313,
+    "error_rate": 0.0009,
+    "repository": "nova-commerce/payments-svc-028",
+    "description": "Payments service 028 is operated by Comet Data and runs in eu-central-1.",
+    "tags": [
+      "payments",
+      "high",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-029",
+    "service_name": "Fulfillment Service 029",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-030",
+      "svc-035",
+      "svc-040"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 28206,
+    "requests_per_minute": 223232,
+    "error_rate": 0.0026,
+    "repository": "nova-commerce/fulfillment-svc-029",
+    "description": "Fulfillment service 029 is operated by Forge Payments and runs in eu-west-1.",
+    "tags": [
+      "fulfillment",
+      "high",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-030",
+    "service_name": "Observability Service 030",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-031",
+      "svc-037",
+      "svc-042"
+    ],
+    "domain": "Observability",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "degraded",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 29183,
+    "requests_per_minute": 231151,
+    "error_rate": 0.0043,
+    "repository": "nova-commerce/observability-svc-030",
+    "description": "Observability service 030 is operated by Helix Identity and runs in us-east-1.",
+    "tags": [
+      "observability",
+      "high",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-031",
+    "service_name": "Customer Service 031",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-032",
+      "svc-034",
+      "svc-044"
+    ],
+    "domain": "Customer",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 30160,
+    "requests_per_minute": 239070,
+    "error_rate": 0.006,
+    "repository": "nova-commerce/customer-svc-031",
+    "description": "Customer service 031 is operated by Nimbus Fulfillment and runs in eu-central-1.",
+    "tags": [
+      "customer",
+      "high",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-032",
+    "service_name": "Analytics Service 032",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-033",
+      "svc-036",
+      "svc-046"
+    ],
+    "domain": "Analytics",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 31137,
+    "requests_per_minute": 246989,
+    "error_rate": 0.0002,
+    "repository": "nova-commerce/analytics-svc-032",
+    "description": "Analytics service 032 is operated by Pulse Growth and runs in eu-west-1.",
+    "tags": [
+      "analytics",
+      "high",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-033",
+    "service_name": "Checkout Service 033",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-034",
+      "svc-038",
+      "svc-048"
+    ],
+    "domain": "Checkout",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 32114,
+    "requests_per_minute": 254908,
+    "error_rate": 0.0019,
+    "repository": "nova-commerce/checkout-svc-033",
+    "description": "Checkout service 033 is operated by Atlas Platform and runs in us-east-1.",
+    "tags": [
+      "checkout",
+      "high",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-034",
+    "service_name": "Identity Service 034",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-035",
+      "svc-040",
+      "svc-050"
+    ],
+    "domain": "Identity",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 33091,
+    "requests_per_minute": 262827,
+    "error_rate": 0.0036,
+    "repository": "nova-commerce/identity-svc-034",
+    "description": "Identity service 034 is operated by Aurora Experience and runs in eu-central-1.",
+    "tags": [
+      "identity",
+      "high",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-035",
+    "service_name": "Catalog Service 035",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-036",
+      "svc-042",
+      "svc-052"
+    ],
+    "domain": "Catalog",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 34068,
+    "requests_per_minute": 270746,
+    "error_rate": 0.0053,
+    "repository": "nova-commerce/catalog-svc-035",
+    "description": "Catalog service 035 is operated by Beacon Reliability and runs in eu-west-1.",
+    "tags": [
+      "catalog",
+      "high",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-036",
+    "service_name": "Payments Service 036",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-037",
+      "svc-039",
+      "svc-047"
+    ],
+    "domain": "Payments",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 35045,
+    "requests_per_minute": 278665,
+    "error_rate": 0.007,
+    "repository": "nova-commerce/payments-svc-036",
+    "description": "Payments service 036 is operated by Comet Data and runs in us-east-1.",
+    "tags": [
+      "payments",
+      "high",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-037",
+    "service_name": "Fulfillment Service 037",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-038",
+      "svc-041",
+      "svc-049"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Rust",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 36022,
+    "requests_per_minute": 6584,
+    "error_rate": 0.0012,
+    "repository": "nova-commerce/fulfillment-svc-037",
+    "description": "Fulfillment service 037 is operated by Forge Payments and runs in eu-central-1.",
+    "tags": [
+      "fulfillment",
+      "high",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-038",
+    "service_name": "Observability Service 038",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-039",
+      "svc-043",
+      "svc-051"
+    ],
+    "domain": "Observability",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 36999,
+    "requests_per_minute": 14503,
+    "error_rate": 0.0029,
+    "repository": "nova-commerce/observability-svc-038",
+    "description": "Observability service 038 is operated by Helix Identity and runs in eu-west-1.",
+    "tags": [
+      "observability",
+      "high",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-039",
+    "service_name": "Customer Service 039",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-040",
+      "svc-045",
+      "svc-053"
+    ],
+    "domain": "Customer",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 37976,
+    "requests_per_minute": 22422,
+    "error_rate": 0.0046,
+    "repository": "nova-commerce/customer-svc-039",
+    "description": "Customer service 039 is operated by Nimbus Fulfillment and runs in us-east-1.",
+    "tags": [
+      "customer",
+      "high",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-040",
+    "service_name": "Analytics Service 040",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-041",
+      "svc-047",
+      "svc-055"
+    ],
+    "domain": "Analytics",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 38953,
+    "requests_per_minute": 30341,
+    "error_rate": 0.0063,
+    "repository": "nova-commerce/analytics-svc-040",
+    "description": "Analytics service 040 is operated by Pulse Growth and runs in eu-central-1.",
+    "tags": [
+      "analytics",
+      "high",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-041",
+    "service_name": "Checkout Service 041",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-042",
+      "svc-044",
+      "svc-057"
+    ],
+    "domain": "Checkout",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 39930,
+    "requests_per_minute": 38260,
+    "error_rate": 0.0005,
+    "repository": "nova-commerce/checkout-svc-041",
+    "description": "Checkout service 041 is operated by Atlas Platform and runs in eu-west-1.",
+    "tags": [
+      "checkout",
+      "high",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-042",
+    "service_name": "Identity Service 042",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-043",
+      "svc-046",
+      "svc-059"
+    ],
+    "domain": "Identity",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "incident",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 40907,
+    "requests_per_minute": 46179,
+    "error_rate": 0.0022,
+    "repository": "nova-commerce/identity-svc-042",
+    "description": "Identity service 042 is operated by Aurora Experience and runs in us-east-1.",
+    "tags": [
+      "identity",
+      "high",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-043",
+    "service_name": "Catalog Service 043",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-044",
+      "svc-048",
+      "svc-054"
+    ],
+    "domain": "Catalog",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 884,
+    "requests_per_minute": 54098,
+    "error_rate": 0.0039,
+    "repository": "nova-commerce/catalog-svc-043",
+    "description": "Catalog service 043 is operated by Beacon Reliability and runs in eu-central-1.",
+    "tags": [
+      "catalog",
+      "high",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-044",
+    "service_name": "Payments Service 044",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-045",
+      "svc-050",
+      "svc-056"
+    ],
+    "domain": "Payments",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 1861,
+    "requests_per_minute": 62017,
+    "error_rate": 0.0056,
+    "repository": "nova-commerce/payments-svc-044",
+    "description": "Payments service 044 is operated by Comet Data and runs in eu-west-1.",
+    "tags": [
+      "payments",
+      "high",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-045",
+    "service_name": "Fulfillment Service 045",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-046",
+      "svc-052",
+      "svc-058"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 2838,
+    "requests_per_minute": 69936,
+    "error_rate": 0.0073,
+    "repository": "nova-commerce/fulfillment-svc-045",
+    "description": "Fulfillment service 045 is operated by Forge Payments and runs in us-east-1.",
+    "tags": [
+      "fulfillment",
+      "high",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-046",
+    "service_name": "Observability Service 046",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-047",
+      "svc-049",
+      "svc-060"
+    ],
+    "domain": "Observability",
+    "runtime": "Kotlin",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 3815,
+    "requests_per_minute": 77855,
+    "error_rate": 0.0015,
+    "repository": "nova-commerce/observability-svc-046",
+    "description": "Observability service 046 is operated by Helix Identity and runs in eu-central-1.",
+    "tags": [
+      "observability",
+      "high",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-047",
+    "service_name": "Customer Service 047",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-048",
+      "svc-051",
+      "svc-062"
+    ],
+    "domain": "Customer",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 4792,
+    "requests_per_minute": 85774,
+    "error_rate": 0.0032,
+    "repository": "nova-commerce/customer-svc-047",
+    "description": "Customer service 047 is operated by Nimbus Fulfillment and runs in eu-west-1.",
+    "tags": [
+      "customer",
+      "high",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-048",
+    "service_name": "Analytics Service 048",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-049",
+      "svc-053",
+      "svc-064"
+    ],
+    "domain": "Analytics",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "high",
+    "health": "healthy",
+    "sla_percent": 99.95,
+    "monthly_cost_eur": 5769,
+    "requests_per_minute": 93693,
+    "error_rate": 0.0049,
+    "repository": "nova-commerce/analytics-svc-048",
+    "description": "Analytics service 048 is operated by Pulse Growth and runs in us-east-1.",
+    "tags": [
+      "analytics",
+      "high",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-049",
+    "service_name": "Checkout Service 049",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-050",
+      "svc-055",
+      "svc-066"
+    ],
+    "domain": "Checkout",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 6746,
+    "requests_per_minute": 101612,
+    "error_rate": 0.0066,
+    "repository": "nova-commerce/checkout-svc-049",
+    "description": "Checkout service 049 is operated by Atlas Platform and runs in eu-central-1.",
+    "tags": [
+      "checkout",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-050",
+    "service_name": "Identity Service 050",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-051",
+      "svc-057",
+      "svc-061"
+    ],
+    "domain": "Identity",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 7723,
+    "requests_per_minute": 109531,
+    "error_rate": 0.0008,
+    "repository": "nova-commerce/identity-svc-050",
+    "description": "Identity service 050 is operated by Aurora Experience and runs in eu-west-1.",
+    "tags": [
+      "identity",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-051",
+    "service_name": "Catalog Service 051",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-052",
+      "svc-054",
+      "svc-063"
+    ],
+    "domain": "Catalog",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 8700,
+    "requests_per_minute": 117450,
+    "error_rate": 0.0025,
+    "repository": "nova-commerce/catalog-svc-051",
+    "description": "Catalog service 051 is operated by Beacon Reliability and runs in us-east-1.",
+    "tags": [
+      "catalog",
+      "standard",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-052",
+    "service_name": "Payments Service 052",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-053",
+      "svc-056",
+      "svc-065"
+    ],
+    "domain": "Payments",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 9677,
+    "requests_per_minute": 125369,
+    "error_rate": 0.0042,
+    "repository": "nova-commerce/payments-svc-052",
+    "description": "Payments service 052 is operated by Comet Data and runs in eu-central-1.",
+    "tags": [
+      "payments",
+      "standard",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-053",
+    "service_name": "Fulfillment Service 053",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-054",
+      "svc-058",
+      "svc-067"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 10654,
+    "requests_per_minute": 133288,
+    "error_rate": 0.0059,
+    "repository": "nova-commerce/fulfillment-svc-053",
+    "description": "Fulfillment service 053 is operated by Forge Payments and runs in eu-west-1.",
+    "tags": [
+      "fulfillment",
+      "standard",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-054",
+    "service_name": "Observability Service 054",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-055",
+      "svc-060",
+      "svc-069"
+    ],
+    "domain": "Observability",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 11631,
+    "requests_per_minute": 141207,
+    "error_rate": 0.0001,
+    "repository": "nova-commerce/observability-svc-054",
+    "description": "Observability service 054 is operated by Helix Identity and runs in us-east-1.",
+    "tags": [
+      "observability",
+      "standard",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-055",
+    "service_name": "Customer Service 055",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-056",
+      "svc-062",
+      "svc-071"
+    ],
+    "domain": "Customer",
+    "runtime": "Rust",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 12608,
+    "requests_per_minute": 149126,
+    "error_rate": 0.0018,
+    "repository": "nova-commerce/customer-svc-055",
+    "description": "Customer service 055 is operated by Nimbus Fulfillment and runs in eu-central-1.",
+    "tags": [
+      "customer",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-056",
+    "service_name": "Analytics Service 056",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-057",
+      "svc-059",
+      "svc-073"
+    ],
+    "domain": "Analytics",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 13585,
+    "requests_per_minute": 157045,
+    "error_rate": 0.0035,
+    "repository": "nova-commerce/analytics-svc-056",
+    "description": "Analytics service 056 is operated by Pulse Growth and runs in eu-west-1.",
+    "tags": [
+      "analytics",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-057",
+    "service_name": "Checkout Service 057",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-058",
+      "svc-061",
+      "svc-068"
+    ],
+    "domain": "Checkout",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 14562,
+    "requests_per_minute": 164964,
+    "error_rate": 0.0052,
+    "repository": "nova-commerce/checkout-svc-057",
+    "description": "Checkout service 057 is operated by Atlas Platform and runs in us-east-1.",
+    "tags": [
+      "checkout",
+      "standard",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-058",
+    "service_name": "Identity Service 058",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-059",
+      "svc-063",
+      "svc-070"
+    ],
+    "domain": "Identity",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 15539,
+    "requests_per_minute": 172883,
+    "error_rate": 0.0069,
+    "repository": "nova-commerce/identity-svc-058",
+    "description": "Identity service 058 is operated by Aurora Experience and runs in eu-central-1.",
+    "tags": [
+      "identity",
+      "standard",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-059",
+    "service_name": "Catalog Service 059",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-060",
+      "svc-065",
+      "svc-072"
+    ],
+    "domain": "Catalog",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "degraded",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 16516,
+    "requests_per_minute": 180802,
+    "error_rate": 0.0011,
+    "repository": "nova-commerce/catalog-svc-059",
+    "description": "Catalog service 059 is operated by Beacon Reliability and runs in eu-west-1.",
+    "tags": [
+      "catalog",
+      "standard",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-060",
+    "service_name": "Payments Service 060",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-061",
+      "svc-067",
+      "svc-074"
+    ],
+    "domain": "Payments",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 17493,
+    "requests_per_minute": 188721,
+    "error_rate": 0.0028,
+    "repository": "nova-commerce/payments-svc-060",
+    "description": "Payments service 060 is operated by Comet Data and runs in us-east-1.",
+    "tags": [
+      "payments",
+      "standard",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-061",
+    "service_name": "Fulfillment Service 061",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-062",
+      "svc-064",
+      "svc-076"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 18470,
+    "requests_per_minute": 196640,
+    "error_rate": 0.0045,
+    "repository": "nova-commerce/fulfillment-svc-061",
+    "description": "Fulfillment service 061 is operated by Forge Payments and runs in eu-central-1.",
+    "tags": [
+      "fulfillment",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-062",
+    "service_name": "Observability Service 062",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-063",
+      "svc-066",
+      "svc-078"
+    ],
+    "domain": "Observability",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 19447,
+    "requests_per_minute": 204559,
+    "error_rate": 0.0062,
+    "repository": "nova-commerce/observability-svc-062",
+    "description": "Observability service 062 is operated by Helix Identity and runs in eu-west-1.",
+    "tags": [
+      "observability",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-063",
+    "service_name": "Customer Service 063",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-064",
+      "svc-068",
+      "svc-080"
+    ],
+    "domain": "Customer",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 20424,
+    "requests_per_minute": 212478,
+    "error_rate": 0.0004,
+    "repository": "nova-commerce/customer-svc-063",
+    "description": "Customer service 063 is operated by Nimbus Fulfillment and runs in us-east-1.",
+    "tags": [
+      "customer",
+      "standard",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-064",
+    "service_name": "Analytics Service 064",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-065",
+      "svc-070",
+      "svc-075"
+    ],
+    "domain": "Analytics",
+    "runtime": "Kotlin",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 21401,
+    "requests_per_minute": 220397,
+    "error_rate": 0.0021,
+    "repository": "nova-commerce/analytics-svc-064",
+    "description": "Analytics service 064 is operated by Pulse Growth and runs in eu-central-1.",
+    "tags": [
+      "analytics",
+      "standard",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-065",
+    "service_name": "Checkout Service 065",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-066",
+      "svc-072",
+      "svc-077"
+    ],
+    "domain": "Checkout",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 22378,
+    "requests_per_minute": 228316,
+    "error_rate": 0.0038,
+    "repository": "nova-commerce/checkout-svc-065",
+    "description": "Checkout service 065 is operated by Atlas Platform and runs in eu-west-1.",
+    "tags": [
+      "checkout",
+      "standard",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-066",
+    "service_name": "Identity Service 066",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-067",
+      "svc-069",
+      "svc-079"
+    ],
+    "domain": "Identity",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 23355,
+    "requests_per_minute": 236235,
+    "error_rate": 0.0055,
+    "repository": "nova-commerce/identity-svc-066",
+    "description": "Identity service 066 is operated by Aurora Experience and runs in us-east-1.",
+    "tags": [
+      "identity",
+      "standard",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-067",
+    "service_name": "Catalog Service 067",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-068",
+      "svc-071",
+      "svc-081"
+    ],
+    "domain": "Catalog",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 24332,
+    "requests_per_minute": 244154,
+    "error_rate": 0.0072,
+    "repository": "nova-commerce/catalog-svc-067",
+    "description": "Catalog service 067 is operated by Beacon Reliability and runs in eu-central-1.",
+    "tags": [
+      "catalog",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-068",
+    "service_name": "Payments Service 068",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-069",
+      "svc-073",
+      "svc-083"
+    ],
+    "domain": "Payments",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 25309,
+    "requests_per_minute": 252073,
+    "error_rate": 0.0014,
+    "repository": "nova-commerce/payments-svc-068",
+    "description": "Payments service 068 is operated by Comet Data and runs in eu-west-1.",
+    "tags": [
+      "payments",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-069",
+    "service_name": "Fulfillment Service 069",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-070",
+      "svc-075",
+      "svc-085"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 26286,
+    "requests_per_minute": 259992,
+    "error_rate": 0.0031,
+    "repository": "nova-commerce/fulfillment-svc-069",
+    "description": "Fulfillment service 069 is operated by Forge Payments and runs in us-east-1.",
+    "tags": [
+      "fulfillment",
+      "standard",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-070",
+    "service_name": "Observability Service 070",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-071",
+      "svc-077",
+      "svc-087"
+    ],
+    "domain": "Observability",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 27263,
+    "requests_per_minute": 267911,
+    "error_rate": 0.0048,
+    "repository": "nova-commerce/observability-svc-070",
+    "description": "Observability service 070 is operated by Helix Identity and runs in eu-central-1.",
+    "tags": [
+      "observability",
+      "standard",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-071",
+    "service_name": "Customer Service 071",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-072",
+      "svc-074",
+      "svc-082"
+    ],
+    "domain": "Customer",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 28240,
+    "requests_per_minute": 275830,
+    "error_rate": 0.0065,
+    "repository": "nova-commerce/customer-svc-071",
+    "description": "Customer service 071 is operated by Nimbus Fulfillment and runs in eu-west-1.",
+    "tags": [
+      "customer",
+      "standard",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-072",
+    "service_name": "Analytics Service 072",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-073",
+      "svc-076",
+      "svc-084"
+    ],
+    "domain": "Analytics",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 29217,
+    "requests_per_minute": 3749,
+    "error_rate": 0.0007,
+    "repository": "nova-commerce/analytics-svc-072",
+    "description": "Analytics service 072 is operated by Pulse Growth and runs in us-east-1.",
+    "tags": [
+      "analytics",
+      "standard",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-073",
+    "service_name": "Checkout Service 073",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-074",
+      "svc-078",
+      "svc-086"
+    ],
+    "domain": "Checkout",
+    "runtime": "Rust",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 30194,
+    "requests_per_minute": 11668,
+    "error_rate": 0.0024,
+    "repository": "nova-commerce/checkout-svc-073",
+    "description": "Checkout service 073 is operated by Atlas Platform and runs in eu-central-1.",
+    "tags": [
+      "checkout",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-074",
+    "service_name": "Identity Service 074",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-075",
+      "svc-080",
+      "svc-088"
+    ],
+    "domain": "Identity",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 31171,
+    "requests_per_minute": 19587,
+    "error_rate": 0.0041,
+    "repository": "nova-commerce/identity-svc-074",
+    "description": "Identity service 074 is operated by Aurora Experience and runs in eu-west-1.",
+    "tags": [
+      "identity",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-075",
+    "service_name": "Catalog Service 075",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-076",
+      "svc-082",
+      "svc-090"
+    ],
+    "domain": "Catalog",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 32148,
+    "requests_per_minute": 27506,
+    "error_rate": 0.0058,
+    "repository": "nova-commerce/catalog-svc-075",
+    "description": "Catalog service 075 is operated by Beacon Reliability and runs in us-east-1.",
+    "tags": [
+      "catalog",
+      "standard",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-076",
+    "service_name": "Payments Service 076",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-077",
+      "svc-079",
+      "svc-092"
+    ],
+    "domain": "Payments",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 33125,
+    "requests_per_minute": 35425,
+    "error_rate": 0,
+    "repository": "nova-commerce/payments-svc-076",
+    "description": "Payments service 076 is operated by Comet Data and runs in eu-central-1.",
+    "tags": [
+      "payments",
+      "standard",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-077",
+    "service_name": "Fulfillment Service 077",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-078",
+      "svc-081",
+      "svc-094"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 34102,
+    "requests_per_minute": 43344,
+    "error_rate": 0.0017,
+    "repository": "nova-commerce/fulfillment-svc-077",
+    "description": "Fulfillment service 077 is operated by Forge Payments and runs in eu-west-1.",
+    "tags": [
+      "fulfillment",
+      "standard",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-078",
+    "service_name": "Observability Service 078",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-079",
+      "svc-083",
+      "svc-089"
+    ],
+    "domain": "Observability",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 35079,
+    "requests_per_minute": 51263,
+    "error_rate": 0.0034,
+    "repository": "nova-commerce/observability-svc-078",
+    "description": "Observability service 078 is operated by Helix Identity and runs in us-east-1.",
+    "tags": [
+      "observability",
+      "standard",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-079",
+    "service_name": "Customer Service 079",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-080",
+      "svc-085",
+      "svc-091"
+    ],
+    "domain": "Customer",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 36056,
+    "requests_per_minute": 59182,
+    "error_rate": 0.0051,
+    "repository": "nova-commerce/customer-svc-079",
+    "description": "Customer service 079 is operated by Nimbus Fulfillment and runs in eu-central-1.",
+    "tags": [
+      "customer",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-080",
+    "service_name": "Analytics Service 080",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-081",
+      "svc-087",
+      "svc-093"
+    ],
+    "domain": "Analytics",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 37033,
+    "requests_per_minute": 67101,
+    "error_rate": 0.0068,
+    "repository": "nova-commerce/analytics-svc-080",
+    "description": "Analytics service 080 is operated by Pulse Growth and runs in eu-west-1.",
+    "tags": [
+      "analytics",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-081",
+    "service_name": "Checkout Service 081",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-082",
+      "svc-084",
+      "svc-095"
+    ],
+    "domain": "Checkout",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 38010,
+    "requests_per_minute": 75020,
+    "error_rate": 0.001,
+    "repository": "nova-commerce/checkout-svc-081",
+    "description": "Checkout service 081 is operated by Atlas Platform and runs in us-east-1.",
+    "tags": [
+      "checkout",
+      "standard",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-082",
+    "service_name": "Identity Service 082",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-083",
+      "svc-086",
+      "svc-097"
+    ],
+    "domain": "Identity",
+    "runtime": "Kotlin",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 38987,
+    "requests_per_minute": 82939,
+    "error_rate": 0.0027,
+    "repository": "nova-commerce/identity-svc-082",
+    "description": "Identity service 082 is operated by Aurora Experience and runs in eu-central-1.",
+    "tags": [
+      "identity",
+      "standard",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-083",
+    "service_name": "Catalog Service 083",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-084",
+      "svc-088",
+      "svc-099"
+    ],
+    "domain": "Catalog",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "incident",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 39964,
+    "requests_per_minute": 90858,
+    "error_rate": 0.0044,
+    "repository": "nova-commerce/catalog-svc-083",
+    "description": "Catalog service 083 is operated by Beacon Reliability and runs in eu-west-1.",
+    "tags": [
+      "catalog",
+      "standard",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-084",
+    "service_name": "Payments Service 084",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-085",
+      "svc-090",
+      "svc-101"
+    ],
+    "domain": "Payments",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 40941,
+    "requests_per_minute": 98777,
+    "error_rate": 0.0061,
+    "repository": "nova-commerce/payments-svc-084",
+    "description": "Payments service 084 is operated by Comet Data and runs in us-east-1.",
+    "tags": [
+      "payments",
+      "standard",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-085",
+    "service_name": "Fulfillment Service 085",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-086",
+      "svc-092",
+      "svc-096"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 918,
+    "requests_per_minute": 106696,
+    "error_rate": 0.0003,
+    "repository": "nova-commerce/fulfillment-svc-085",
+    "description": "Fulfillment service 085 is operated by Forge Payments and runs in eu-central-1.",
+    "tags": [
+      "fulfillment",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-086",
+    "service_name": "Observability Service 086",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-087",
+      "svc-089",
+      "svc-098"
+    ],
+    "domain": "Observability",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 1895,
+    "requests_per_minute": 114615,
+    "error_rate": 0.002,
+    "repository": "nova-commerce/observability-svc-086",
+    "description": "Observability service 086 is operated by Helix Identity and runs in eu-west-1.",
+    "tags": [
+      "observability",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-087",
+    "service_name": "Customer Service 087",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-088",
+      "svc-091",
+      "svc-100"
+    ],
+    "domain": "Customer",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 2872,
+    "requests_per_minute": 122534,
+    "error_rate": 0.0037,
+    "repository": "nova-commerce/customer-svc-087",
+    "description": "Customer service 087 is operated by Nimbus Fulfillment and runs in us-east-1.",
+    "tags": [
+      "customer",
+      "standard",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-088",
+    "service_name": "Analytics Service 088",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-089",
+      "svc-093",
+      "svc-102"
+    ],
+    "domain": "Analytics",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "degraded",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 3849,
+    "requests_per_minute": 130453,
+    "error_rate": 0.0054,
+    "repository": "nova-commerce/analytics-svc-088",
+    "description": "Analytics service 088 is operated by Pulse Growth and runs in eu-central-1.",
+    "tags": [
+      "analytics",
+      "standard",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-089",
+    "service_name": "Checkout Service 089",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-090",
+      "svc-095",
+      "svc-104"
+    ],
+    "domain": "Checkout",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 4826,
+    "requests_per_minute": 138372,
+    "error_rate": 0.0071,
+    "repository": "nova-commerce/checkout-svc-089",
+    "description": "Checkout service 089 is operated by Atlas Platform and runs in eu-west-1.",
+    "tags": [
+      "checkout",
+      "standard",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-090",
+    "service_name": "Identity Service 090",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-091",
+      "svc-097",
+      "svc-106"
+    ],
+    "domain": "Identity",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 5803,
+    "requests_per_minute": 146291,
+    "error_rate": 0.0013,
+    "repository": "nova-commerce/identity-svc-090",
+    "description": "Identity service 090 is operated by Aurora Experience and runs in us-east-1.",
+    "tags": [
+      "identity",
+      "standard",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-091",
+    "service_name": "Catalog Service 091",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-092",
+      "svc-094",
+      "svc-108"
+    ],
+    "domain": "Catalog",
+    "runtime": "Rust",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 6780,
+    "requests_per_minute": 154210,
+    "error_rate": 0.003,
+    "repository": "nova-commerce/catalog-svc-091",
+    "description": "Catalog service 091 is operated by Beacon Reliability and runs in eu-central-1.",
+    "tags": [
+      "catalog",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-092",
+    "service_name": "Payments Service 092",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-093",
+      "svc-096",
+      "svc-103"
+    ],
+    "domain": "Payments",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 7757,
+    "requests_per_minute": 162129,
+    "error_rate": 0.0047,
+    "repository": "nova-commerce/payments-svc-092",
+    "description": "Payments service 092 is operated by Comet Data and runs in eu-west-1.",
+    "tags": [
+      "payments",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-093",
+    "service_name": "Fulfillment Service 093",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-094",
+      "svc-098",
+      "svc-105"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 8734,
+    "requests_per_minute": 170048,
+    "error_rate": 0.0064,
+    "repository": "nova-commerce/fulfillment-svc-093",
+    "description": "Fulfillment service 093 is operated by Forge Payments and runs in us-east-1.",
+    "tags": [
+      "fulfillment",
+      "standard",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-094",
+    "service_name": "Observability Service 094",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-095",
+      "svc-100",
+      "svc-107"
+    ],
+    "domain": "Observability",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 9711,
+    "requests_per_minute": 177967,
+    "error_rate": 0.0006,
+    "repository": "nova-commerce/observability-svc-094",
+    "description": "Observability service 094 is operated by Helix Identity and runs in eu-central-1.",
+    "tags": [
+      "observability",
+      "standard",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-095",
+    "service_name": "Customer Service 095",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-096",
+      "svc-102",
+      "svc-109"
+    ],
+    "domain": "Customer",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 10688,
+    "requests_per_minute": 185886,
+    "error_rate": 0.0023,
+    "repository": "nova-commerce/customer-svc-095",
+    "description": "Customer service 095 is operated by Nimbus Fulfillment and runs in eu-west-1.",
+    "tags": [
+      "customer",
+      "standard",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-096",
+    "service_name": "Analytics Service 096",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-097",
+      "svc-099",
+      "svc-111"
+    ],
+    "domain": "Analytics",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 11665,
+    "requests_per_minute": 193805,
+    "error_rate": 0.004,
+    "repository": "nova-commerce/analytics-svc-096",
+    "description": "Analytics service 096 is operated by Pulse Growth and runs in us-east-1.",
+    "tags": [
+      "analytics",
+      "standard",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-097",
+    "service_name": "Checkout Service 097",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-098",
+      "svc-101",
+      "svc-113"
+    ],
+    "domain": "Checkout",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 12642,
+    "requests_per_minute": 201724,
+    "error_rate": 0.0057,
+    "repository": "nova-commerce/checkout-svc-097",
+    "description": "Checkout service 097 is operated by Atlas Platform and runs in eu-central-1.",
+    "tags": [
+      "checkout",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-098",
+    "service_name": "Identity Service 098",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-099",
+      "svc-103",
+      "svc-115"
+    ],
+    "domain": "Identity",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 13619,
+    "requests_per_minute": 209643,
+    "error_rate": 0.0074,
+    "repository": "nova-commerce/identity-svc-098",
+    "description": "Identity service 098 is operated by Aurora Experience and runs in eu-west-1.",
+    "tags": [
+      "identity",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-099",
+    "service_name": "Catalog Service 099",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-100",
+      "svc-105",
+      "svc-110"
+    ],
+    "domain": "Catalog",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 14596,
+    "requests_per_minute": 217562,
+    "error_rate": 0.0016,
+    "repository": "nova-commerce/catalog-svc-099",
+    "description": "Catalog service 099 is operated by Beacon Reliability and runs in us-east-1.",
+    "tags": [
+      "catalog",
+      "standard",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-100",
+    "service_name": "Payments Service 100",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-101",
+      "svc-107",
+      "svc-112"
+    ],
+    "domain": "Payments",
+    "runtime": "Kotlin",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 15573,
+    "requests_per_minute": 225481,
+    "error_rate": 0.0033,
+    "repository": "nova-commerce/payments-svc-100",
+    "description": "Payments service 100 is operated by Comet Data and runs in eu-central-1.",
+    "tags": [
+      "payments",
+      "standard",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-101",
+    "service_name": "Fulfillment Service 101",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-102",
+      "svc-104",
+      "svc-114"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 16550,
+    "requests_per_minute": 233400,
+    "error_rate": 0.005,
+    "repository": "nova-commerce/fulfillment-svc-101",
+    "description": "Fulfillment service 101 is operated by Forge Payments and runs in eu-west-1.",
+    "tags": [
+      "fulfillment",
+      "standard",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-102",
+    "service_name": "Observability Service 102",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-103",
+      "svc-106",
+      "svc-116"
+    ],
+    "domain": "Observability",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 17527,
+    "requests_per_minute": 241319,
+    "error_rate": 0.0067,
+    "repository": "nova-commerce/observability-svc-102",
+    "description": "Observability service 102 is operated by Helix Identity and runs in us-east-1.",
+    "tags": [
+      "observability",
+      "standard",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-103",
+    "service_name": "Customer Service 103",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-104",
+      "svc-108",
+      "svc-118"
+    ],
+    "domain": "Customer",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 18504,
+    "requests_per_minute": 249238,
+    "error_rate": 0.0009,
+    "repository": "nova-commerce/customer-svc-103",
+    "description": "Customer service 103 is operated by Nimbus Fulfillment and runs in eu-central-1.",
+    "tags": [
+      "customer",
+      "standard",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-104",
+    "service_name": "Analytics Service 104",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-105",
+      "svc-110",
+      "svc-120"
+    ],
+    "domain": "Analytics",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "standard",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 19481,
+    "requests_per_minute": 257157,
+    "error_rate": 0.0026,
+    "repository": "nova-commerce/analytics-svc-104",
+    "description": "Analytics service 104 is operated by Pulse Growth and runs in eu-west-1.",
+    "tags": [
+      "analytics",
+      "standard",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-105",
+    "service_name": "Checkout Service 105",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-106",
+      "svc-112",
+      "svc-122"
+    ],
+    "domain": "Checkout",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 20458,
+    "requests_per_minute": 265076,
+    "error_rate": 0.0043,
+    "repository": "nova-commerce/checkout-svc-105",
+    "description": "Checkout service 105 is operated by Atlas Platform and runs in us-east-1.",
+    "tags": [
+      "checkout",
+      "internal",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-106",
+    "service_name": "Identity Service 106",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-107",
+      "svc-109",
+      "svc-117"
+    ],
+    "domain": "Identity",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 21435,
+    "requests_per_minute": 272995,
+    "error_rate": 0.006,
+    "repository": "nova-commerce/identity-svc-106",
+    "description": "Identity service 106 is operated by Aurora Experience and runs in eu-central-1.",
+    "tags": [
+      "identity",
+      "internal",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-107",
+    "service_name": "Catalog Service 107",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-108",
+      "svc-111",
+      "svc-119"
+    ],
+    "domain": "Catalog",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 22412,
+    "requests_per_minute": 280914,
+    "error_rate": 0.0002,
+    "repository": "nova-commerce/catalog-svc-107",
+    "description": "Catalog service 107 is operated by Beacon Reliability and runs in eu-west-1.",
+    "tags": [
+      "catalog",
+      "internal",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-108",
+    "service_name": "Payments Service 108",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-109",
+      "svc-113",
+      "svc-121"
+    ],
+    "domain": "Payments",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 23389,
+    "requests_per_minute": 8833,
+    "error_rate": 0.0019,
+    "repository": "nova-commerce/payments-svc-108",
+    "description": "Payments service 108 is operated by Comet Data and runs in us-east-1.",
+    "tags": [
+      "payments",
+      "internal",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-109",
+    "service_name": "Fulfillment Service 109",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-110",
+      "svc-115",
+      "svc-123"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Rust",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 24366,
+    "requests_per_minute": 16752,
+    "error_rate": 0.0036,
+    "repository": "nova-commerce/fulfillment-svc-109",
+    "description": "Fulfillment service 109 is operated by Forge Payments and runs in eu-central-1.",
+    "tags": [
+      "fulfillment",
+      "internal",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-110",
+    "service_name": "Observability Service 110",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-111",
+      "svc-117",
+      "svc-125"
+    ],
+    "domain": "Observability",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 25343,
+    "requests_per_minute": 24671,
+    "error_rate": 0.0053,
+    "repository": "nova-commerce/observability-svc-110",
+    "description": "Observability service 110 is operated by Helix Identity and runs in eu-west-1.",
+    "tags": [
+      "observability",
+      "internal",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-111",
+    "service_name": "Customer Service 111",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-112",
+      "svc-114",
+      "svc-127"
+    ],
+    "domain": "Customer",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 26320,
+    "requests_per_minute": 32590,
+    "error_rate": 0.007,
+    "repository": "nova-commerce/customer-svc-111",
+    "description": "Customer service 111 is operated by Nimbus Fulfillment and runs in us-east-1.",
+    "tags": [
+      "customer",
+      "internal",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-112",
+    "service_name": "Analytics Service 112",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-113",
+      "svc-116",
+      "svc-129"
+    ],
+    "domain": "Analytics",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 27297,
+    "requests_per_minute": 40509,
+    "error_rate": 0.0012,
+    "repository": "nova-commerce/analytics-svc-112",
+    "description": "Analytics service 112 is operated by Pulse Growth and runs in eu-central-1.",
+    "tags": [
+      "analytics",
+      "internal",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-113",
+    "service_name": "Checkout Service 113",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-114",
+      "svc-118",
+      "svc-124"
+    ],
+    "domain": "Checkout",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 28274,
+    "requests_per_minute": 48428,
+    "error_rate": 0.0029,
+    "repository": "nova-commerce/checkout-svc-113",
+    "description": "Checkout service 113 is operated by Atlas Platform and runs in eu-west-1.",
+    "tags": [
+      "checkout",
+      "internal",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-114",
+    "service_name": "Identity Service 114",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-115",
+      "svc-120",
+      "svc-126"
+    ],
+    "domain": "Identity",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 29251,
+    "requests_per_minute": 56347,
+    "error_rate": 0.0046,
+    "repository": "nova-commerce/identity-svc-114",
+    "description": "Identity service 114 is operated by Aurora Experience and runs in us-east-1.",
+    "tags": [
+      "identity",
+      "internal",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-115",
+    "service_name": "Catalog Service 115",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-116",
+      "svc-122",
+      "svc-128"
+    ],
+    "domain": "Catalog",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 30228,
+    "requests_per_minute": 64266,
+    "error_rate": 0.0063,
+    "repository": "nova-commerce/catalog-svc-115",
+    "description": "Catalog service 115 is operated by Beacon Reliability and runs in eu-central-1.",
+    "tags": [
+      "catalog",
+      "internal",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-116",
+    "service_name": "Payments Service 116",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-117",
+      "svc-119",
+      "svc-130"
+    ],
+    "domain": "Payments",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 31205,
+    "requests_per_minute": 72185,
+    "error_rate": 0.0005,
+    "repository": "nova-commerce/payments-svc-116",
+    "description": "Payments service 116 is operated by Comet Data and runs in eu-west-1.",
+    "tags": [
+      "payments",
+      "internal",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-117",
+    "service_name": "Fulfillment Service 117",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-118",
+      "svc-121",
+      "svc-132"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "degraded",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 32182,
+    "requests_per_minute": 80104,
+    "error_rate": 0.0022,
+    "repository": "nova-commerce/fulfillment-svc-117",
+    "description": "Fulfillment service 117 is operated by Forge Payments and runs in us-east-1.",
+    "tags": [
+      "fulfillment",
+      "internal",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-118",
+    "service_name": "Observability Service 118",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-119",
+      "svc-123",
+      "svc-134"
+    ],
+    "domain": "Observability",
+    "runtime": "Kotlin",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 33159,
+    "requests_per_minute": 88023,
+    "error_rate": 0.0039,
+    "repository": "nova-commerce/observability-svc-118",
+    "description": "Observability service 118 is operated by Helix Identity and runs in eu-central-1.",
+    "tags": [
+      "observability",
+      "internal",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-119",
+    "service_name": "Customer Service 119",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-120",
+      "svc-125",
+      "svc-136"
+    ],
+    "domain": "Customer",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 34136,
+    "requests_per_minute": 95942,
+    "error_rate": 0.0056,
+    "repository": "nova-commerce/customer-svc-119",
+    "description": "Customer service 119 is operated by Nimbus Fulfillment and runs in eu-west-1.",
+    "tags": [
+      "customer",
+      "internal",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-120",
+    "service_name": "Analytics Service 120",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-121",
+      "svc-127",
+      "svc-131"
+    ],
+    "domain": "Analytics",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 35113,
+    "requests_per_minute": 103861,
+    "error_rate": 0.0073,
+    "repository": "nova-commerce/analytics-svc-120",
+    "description": "Analytics service 120 is operated by Pulse Growth and runs in us-east-1.",
+    "tags": [
+      "analytics",
+      "internal",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-121",
+    "service_name": "Checkout Service 121",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-122",
+      "svc-124",
+      "svc-133"
+    ],
+    "domain": "Checkout",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 36090,
+    "requests_per_minute": 111780,
+    "error_rate": 0.0015,
+    "repository": "nova-commerce/checkout-svc-121",
+    "description": "Checkout service 121 is operated by Atlas Platform and runs in eu-central-1.",
+    "tags": [
+      "checkout",
+      "internal",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-122",
+    "service_name": "Identity Service 122",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-123",
+      "svc-126",
+      "svc-135"
+    ],
+    "domain": "Identity",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 37067,
+    "requests_per_minute": 119699,
+    "error_rate": 0.0032,
+    "repository": "nova-commerce/identity-svc-122",
+    "description": "Identity service 122 is operated by Aurora Experience and runs in eu-west-1.",
+    "tags": [
+      "identity",
+      "internal",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-123",
+    "service_name": "Catalog Service 123",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-124",
+      "svc-128",
+      "svc-137"
+    ],
+    "domain": "Catalog",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 38044,
+    "requests_per_minute": 127618,
+    "error_rate": 0.0049,
+    "repository": "nova-commerce/catalog-svc-123",
+    "description": "Catalog service 123 is operated by Beacon Reliability and runs in us-east-1.",
+    "tags": [
+      "catalog",
+      "internal",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-124",
+    "service_name": "Payments Service 124",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-125",
+      "svc-130",
+      "svc-139"
+    ],
+    "domain": "Payments",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "incident",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 39021,
+    "requests_per_minute": 135537,
+    "error_rate": 0.0066,
+    "repository": "nova-commerce/payments-svc-124",
+    "description": "Payments service 124 is operated by Comet Data and runs in eu-central-1.",
+    "tags": [
+      "payments",
+      "internal",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-125",
+    "service_name": "Fulfillment Service 125",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-126",
+      "svc-132",
+      "svc-141"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 39998,
+    "requests_per_minute": 143456,
+    "error_rate": 0.0008,
+    "repository": "nova-commerce/fulfillment-svc-125",
+    "description": "Fulfillment service 125 is operated by Forge Payments and runs in eu-west-1.",
+    "tags": [
+      "fulfillment",
+      "internal",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-126",
+    "service_name": "Observability Service 126",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-127",
+      "svc-129",
+      "svc-143"
+    ],
+    "domain": "Observability",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 40975,
+    "requests_per_minute": 151375,
+    "error_rate": 0.0025,
+    "repository": "nova-commerce/observability-svc-126",
+    "description": "Observability service 126 is operated by Helix Identity and runs in us-east-1.",
+    "tags": [
+      "observability",
+      "internal",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-127",
+    "service_name": "Customer Service 127",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-128",
+      "svc-131",
+      "svc-138"
+    ],
+    "domain": "Customer",
+    "runtime": "Rust",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 952,
+    "requests_per_minute": 159294,
+    "error_rate": 0.0042,
+    "repository": "nova-commerce/customer-svc-127",
+    "description": "Customer service 127 is operated by Nimbus Fulfillment and runs in eu-central-1.",
+    "tags": [
+      "customer",
+      "internal",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-128",
+    "service_name": "Analytics Service 128",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-129",
+      "svc-133",
+      "svc-140"
+    ],
+    "domain": "Analytics",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 1929,
+    "requests_per_minute": 167213,
+    "error_rate": 0.0059,
+    "repository": "nova-commerce/analytics-svc-128",
+    "description": "Analytics service 128 is operated by Pulse Growth and runs in eu-west-1.",
+    "tags": [
+      "analytics",
+      "internal",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-129",
+    "service_name": "Checkout Service 129",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-130",
+      "svc-135",
+      "svc-142"
+    ],
+    "domain": "Checkout",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 2906,
+    "requests_per_minute": 175132,
+    "error_rate": 0.0001,
+    "repository": "nova-commerce/checkout-svc-129",
+    "description": "Checkout service 129 is operated by Atlas Platform and runs in us-east-1.",
+    "tags": [
+      "checkout",
+      "internal",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-130",
+    "service_name": "Identity Service 130",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-131",
+      "svc-137",
+      "svc-144"
+    ],
+    "domain": "Identity",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 3883,
+    "requests_per_minute": 183051,
+    "error_rate": 0.0018,
+    "repository": "nova-commerce/identity-svc-130",
+    "description": "Identity service 130 is operated by Aurora Experience and runs in eu-central-1.",
+    "tags": [
+      "identity",
+      "internal",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-131",
+    "service_name": "Catalog Service 131",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-132",
+      "svc-134",
+      "svc-002"
+    ],
+    "domain": "Catalog",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 4860,
+    "requests_per_minute": 190970,
+    "error_rate": 0.0035,
+    "repository": "nova-commerce/catalog-svc-131",
+    "description": "Catalog service 131 is operated by Beacon Reliability and runs in eu-west-1.",
+    "tags": [
+      "catalog",
+      "internal",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-132",
+    "service_name": "Payments Service 132",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-133",
+      "svc-136",
+      "svc-004"
+    ],
+    "domain": "Payments",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 5837,
+    "requests_per_minute": 198889,
+    "error_rate": 0.0052,
+    "repository": "nova-commerce/payments-svc-132",
+    "description": "Payments service 132 is operated by Comet Data and runs in us-east-1.",
+    "tags": [
+      "payments",
+      "internal",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-133",
+    "service_name": "Fulfillment Service 133",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-134",
+      "svc-138",
+      "svc-006"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 6814,
+    "requests_per_minute": 206808,
+    "error_rate": 0.0069,
+    "repository": "nova-commerce/fulfillment-svc-133",
+    "description": "Fulfillment service 133 is operated by Forge Payments and runs in eu-central-1.",
+    "tags": [
+      "fulfillment",
+      "internal",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-134",
+    "service_name": "Observability Service 134",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-135",
+      "svc-140",
+      "svc-001"
+    ],
+    "domain": "Observability",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 7791,
+    "requests_per_minute": 214727,
+    "error_rate": 0.0011,
+    "repository": "nova-commerce/observability-svc-134",
+    "description": "Observability service 134 is operated by Helix Identity and runs in eu-west-1.",
+    "tags": [
+      "observability",
+      "internal",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-135",
+    "service_name": "Customer Service 135",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-136",
+      "svc-142",
+      "svc-003"
+    ],
+    "domain": "Customer",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 8768,
+    "requests_per_minute": 222646,
+    "error_rate": 0.0028,
+    "repository": "nova-commerce/customer-svc-135",
+    "description": "Customer service 135 is operated by Nimbus Fulfillment and runs in us-east-1.",
+    "tags": [
+      "customer",
+      "internal",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-136",
+    "service_name": "Analytics Service 136",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-137",
+      "svc-139",
+      "svc-005"
+    ],
+    "domain": "Analytics",
+    "runtime": "Kotlin",
+    "environment": "staging",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 9745,
+    "requests_per_minute": 230565,
+    "error_rate": 0.0045,
+    "repository": "nova-commerce/analytics-svc-136",
+    "description": "Analytics service 136 is operated by Pulse Growth and runs in eu-central-1.",
+    "tags": [
+      "analytics",
+      "internal",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-137",
+    "service_name": "Checkout Service 137",
+    "owner_team": "atlas",
+    "owner_team_name": "Atlas Platform",
+    "depends_on": [
+      "svc-138",
+      "svc-141",
+      "svc-007"
+    ],
+    "domain": "Checkout",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 10722,
+    "requests_per_minute": 238484,
+    "error_rate": 0.0062,
+    "repository": "nova-commerce/checkout-svc-137",
+    "description": "Checkout service 137 is operated by Atlas Platform and runs in eu-west-1.",
+    "tags": [
+      "checkout",
+      "internal",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-138",
+    "service_name": "Identity Service 138",
+    "owner_team": "aurora",
+    "owner_team_name": "Aurora Experience",
+    "depends_on": [
+      "svc-139",
+      "svc-143",
+      "svc-009"
+    ],
+    "domain": "Identity",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 11699,
+    "requests_per_minute": 246403,
+    "error_rate": 0.0004,
+    "repository": "nova-commerce/identity-svc-138",
+    "description": "Identity service 138 is operated by Aurora Experience and runs in us-east-1.",
+    "tags": [
+      "identity",
+      "internal",
+      "typescript"
+    ]
+  },
+  {
+    "service_id": "svc-139",
+    "service_name": "Catalog Service 139",
+    "owner_team": "beacon",
+    "owner_team_name": "Beacon Reliability",
+    "depends_on": [
+      "svc-140",
+      "svc-001",
+      "svc-011"
+    ],
+    "domain": "Catalog",
+    "runtime": "Rust",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 12676,
+    "requests_per_minute": 254322,
+    "error_rate": 0.0021,
+    "repository": "nova-commerce/catalog-svc-139",
+    "description": "Catalog service 139 is operated by Beacon Reliability and runs in eu-central-1.",
+    "tags": [
+      "catalog",
+      "internal",
+      "rust"
+    ]
+  },
+  {
+    "service_id": "svc-140",
+    "service_name": "Payments Service 140",
+    "owner_team": "comet",
+    "owner_team_name": "Comet Data",
+    "depends_on": [
+      "svc-141",
+      "svc-003",
+      "svc-013"
+    ],
+    "domain": "Payments",
+    "runtime": "Java",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 13653,
+    "requests_per_minute": 262241,
+    "error_rate": 0.0038,
+    "repository": "nova-commerce/payments-svc-140",
+    "description": "Payments service 140 is operated by Comet Data and runs in eu-west-1.",
+    "tags": [
+      "payments",
+      "internal",
+      "java"
+    ]
+  },
+  {
+    "service_id": "svc-141",
+    "service_name": "Fulfillment Service 141",
+    "owner_team": "forge",
+    "owner_team_name": "Forge Payments",
+    "depends_on": [
+      "svc-142",
+      "svc-144",
+      "svc-008"
+    ],
+    "domain": "Fulfillment",
+    "runtime": "Python",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 14630,
+    "requests_per_minute": 270160,
+    "error_rate": 0.0055,
+    "repository": "nova-commerce/fulfillment-svc-141",
+    "description": "Fulfillment service 141 is operated by Forge Payments and runs in us-east-1.",
+    "tags": [
+      "fulfillment",
+      "internal",
+      "python"
+    ]
+  },
+  {
+    "service_id": "svc-142",
+    "service_name": "Observability Service 142",
+    "owner_team": "helix",
+    "owner_team_name": "Helix Identity",
+    "depends_on": [
+      "svc-143",
+      "svc-002",
+      "svc-010"
+    ],
+    "domain": "Observability",
+    "runtime": "Kotlin",
+    "environment": "production",
+    "region": "eu-central-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 15607,
+    "requests_per_minute": 278079,
+    "error_rate": 0.0072,
+    "repository": "nova-commerce/observability-svc-142",
+    "description": "Observability service 142 is operated by Helix Identity and runs in eu-central-1.",
+    "tags": [
+      "observability",
+      "internal",
+      "kotlin"
+    ]
+  },
+  {
+    "service_id": "svc-143",
+    "service_name": "Customer Service 143",
+    "owner_team": "nimbus",
+    "owner_team_name": "Nimbus Fulfillment",
+    "depends_on": [
+      "svc-144",
+      "svc-004",
+      "svc-012"
+    ],
+    "domain": "Customer",
+    "runtime": "Go",
+    "environment": "production",
+    "region": "eu-west-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 16584,
+    "requests_per_minute": 5998,
+    "error_rate": 0.0014,
+    "repository": "nova-commerce/customer-svc-143",
+    "description": "Customer service 143 is operated by Nimbus Fulfillment and runs in eu-west-1.",
+    "tags": [
+      "customer",
+      "internal",
+      "go"
+    ]
+  },
+  {
+    "service_id": "svc-144",
+    "service_name": "Analytics Service 144",
+    "owner_team": "pulse",
+    "owner_team_name": "Pulse Growth",
+    "depends_on": [
+      "svc-001",
+      "svc-006",
+      "svc-014"
+    ],
+    "domain": "Analytics",
+    "runtime": "TypeScript",
+    "environment": "production",
+    "region": "us-east-1",
+    "tier": "internal",
+    "health": "healthy",
+    "sla_percent": 99.9,
+    "monthly_cost_eur": 17561,
+    "requests_per_minute": 13917,
+    "error_rate": 0.0031,
+    "repository": "nova-commerce/analytics-svc-144",
+    "description": "Analytics service 144 is operated by Pulse Growth and runs in us-east-1.",
+    "tags": [
+      "analytics",
+      "internal",
+      "typescript"
+    ]
+  }
+]

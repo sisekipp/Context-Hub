@@ -245,7 +245,7 @@ function TransformEditor({ transforms, onChange, onError, onErrorChange }: { tra
   </div>;
 }
 
-export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology, dataSource, onDataSourceLoaded, onImport }: { ontologyId: string; ontologyName: string; ontologySlug: string; ontology: OntologyCatalog; dataSource: BrowserDataSource | null; onDataSourceLoaded: (source: BrowserDataSource) => void; onImport: (graph: ImportedGraph) => void }) {
+export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology, dataSource, onDataSourceLoaded, onImport }: { ontologyId: string; ontologyName: string; ontologySlug: string; ontology: OntologyCatalog; dataSource: BrowserDataSource | null; onDataSourceLoaded: (source: BrowserDataSource) => void; onImport: (graph: ImportedGraph, ontologyVersionId: string) => void }) {
   const prepared = useMemo(() => {
     if (!dataSource) return { objectMappings: [] as ObjectMapping[], linkMappings: [] as LinkMapping[], revision: 0, backendMappingId: "", error: "" };
     try {
@@ -398,7 +398,7 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
       setMessage("DataFusion ingestion is running…");
       const job = await startIngestion(dataSource!.id, mapping.id, version.id);
       if (job.state !== IngestionState.SUCCEEDED) throw new Error(job.error || "The ingestion job did not complete successfully.");
-      const graph = createGraph(); onImport(graph);
+      const graph = createGraph(); onImport(graph, version.id);
       setMessage(`${job.nodesWritten.toLocaleString("de-DE")} objects and ${job.edgesWritten.toLocaleString("de-DE")} links persisted in ClickHouse · ${job.rowsRejected.toLocaleString("de-DE")} rows rejected from ${job.rowsRead.toLocaleString("de-DE")} read.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "The import could not be completed.");

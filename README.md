@@ -1,101 +1,388 @@
+<div align="center">
+
 # ContextHub
 
-ContextHub is an ontology-driven property graph. Teams define their own object types, properties, links, and interfaces, map source data into that ontology, and explore the resulting graph in 2D, 3D, gRPC, or read-only MCP clients.
+### Turn organizational data into a shared, explorable, AI-ready context layer.
 
-The repository is a greenfield V1 implementation inspired by the semantic model of Palantir Foundry and the Rust/ClickHouse architecture of GitLab Orbit. No Orbit source code is included.
+![Rust 1.89](https://img.shields.io/badge/Rust-1.89-CE412B?logo=rust&logoColor=white)
+![Next.js 16](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
+![ClickHouse](https://img.shields.io/badge/ClickHouse-25.8-FFCC01?logo=clickhouse&logoColor=111111)
+![MCP](https://img.shields.io/badge/MCP-read--only-6E8BFF)
 
-## What is implemented
+ContextHub lets teams define their own ontologies, map heterogeneous source data into them,
+and explore the resulting property graph through a visual UI, gRPC APIs, and an evolving
+read-only Model Context Protocol surface.
 
-- A versioned ontology domain with object and link types, interfaces, value types, structs, shared and derived properties, and read-only functions.
-- Validation for API names, identities, reusable type references, function boundaries, link targets, enums, and interface cycles.
-- Optimistic backend draft revisions and immutable publish versions in the gRPC service. Work-in-progress drafts may be temporarily invalid; validation remains mandatory at publish time.
-- A declarative `MappingPlan` compiled into safe Apache DataFusion SQL expressions, with an ordered visual transformation pipeline and per-field Skip row, Use null, or Abort import strategy.
-- Resumable JSON, NDJSON, CSV, and Parquet multipart uploads through gRPC-Web into MinIO, plus secured REST and GraphQL sources with bounded backend previews and encrypted credentials.
-- A background ingestion path that reads uploaded objects as Arrow batches, executes the ontology-specific mapping through DataFusion, and writes nodes and links to ClickHouse.
-- Bounded, tenant-scoped graph query compilation into parameterized ClickHouse SQL.
-- Ontology-version-scoped graph batch ingestion with stable node/edge IDs and persistent ClickHouse storage.
-- A working `GraphService` for bounded node queries, traversals, edge results, and single-object lookup.
-- A unified ClickHouse schema for control-plane metadata and property-graph data.
-- Durable ClickHouse control-plane repositories for ontology drafts/versions, data-source metadata, ontology-specific mappings, and ingestion jobs, including runtime reload after restart.
-- Ontology-scoped import history with durable field/row events, safe retries, and source-field provenance in the Explorer property inspector.
-- gRPC and gRPC-Web contracts for workspaces, ontologies, data sources, ingestion, and graph queries.
-- Published, type-checked read-only Function execution through publish-validated controlled expressions, testable allowlisted external gRPC providers, or managed, fuel- and memory-limited WASM modules. Function executions and failures are retained in ClickHouse.
-- Read-only MCP tools for schema discovery and graph access.
-- A Next.js frontend with a backend-persisted React Flow ontology editor, revisioned ontology-bound JSON/NDJSON/CSV/Parquet object and link mappings, and a connected 2D/3D graph explorer.
-- A workspace ontology switcher: users can create multiple isolated ontologies, while data-source definitions remain reusable at workspace level and mappings remain ontology-specific.
-- A Devcontainer with ClickHouse and MinIO. Local development uses `AUTH_MODE=dev`; no authentication service is started.
+[Quick start](#quick-start) · [Architecture](#architecture) · [Demo](#nova-commerce-demo) · [Documentation](#documentation) · [Project status](#project-status)
+
+</div>
+
+<p align="center">
+  <img src="demo/assets/screenshots/01-explorer-2d-overview.png" alt="ContextHub 2D knowledge graph explorer" width="100%">
+</p>
+
+> [!NOTE]
+> ContextHub is a greenfield V1 implementation inspired by the semantic modeling concepts
+> of Palantir Foundry and the Rust/ClickHouse architecture of GitLab Orbit.
+
+## Why ContextHub?
+
+Raw records rarely contain enough meaning on their own. An AI model, analyst, or application
+may see a service name, a team identifier, and a list of dependencies—but not understand how
+those facts belong together.
+
+ContextHub adds that missing semantic layer:
+
+- **You define the model.** Object types, properties, interfaces, reusable types, links, and
+  functions are not fixed by the platform.
+- **Sources stay reusable.** Files, REST endpoints, and GraphQL endpoints belong to the
+  workspace, while every ontology owns its interpretation of those sources.
+- **Graphs stay isolated.** Published data is scoped by workspace and immutable ontology
+  version, so separate ontologies never leak semantics or graph data into one another.
+- **Every field remains explainable.** Property provenance links an object value back to its
+  source, source field, mapping, import job, and import timestamp.
+- **AI receives structured context.** The read-only MCP surface is designed to expose schema
+  discovery, object search, object lookup, and bounded graph queries to AI agents.
+
+## Product tour
+
+| Visual ontology modeling | Ontology-bound data mapping |
+| --- | --- |
+| <img src="demo/assets/screenshots/03-ontology-editor.png" alt="Visual ontology editor" width="100%"> | <img src="demo/assets/screenshots/04-data-mapping.png" alt="Visual data mapping" width="100%"> |
+
+| Relationship mapping | Import history and provenance |
+| --- | --- |
+| <img src="demo/assets/screenshots/05-link-mapping.png" alt="Ontology link mapping" width="100%"> | <img src="demo/assets/screenshots/06-import-history.png" alt="Import history" width="100%"> |
+
+| Visual Graph Query Builder | Interactive 3D exploration |
+| --- | --- |
+| <img src="demo/assets/screenshots/07-graph-query-builder.png" alt="Graph Query Builder" width="100%"> | <img src="demo/assets/screenshots/09-explorer-3d.png" alt="3D graph explorer" width="100%"> |
+
+### From graph data to AI context
+
+<p align="center">
+  <img src="demo/assets/screenshots/11-mcp-ai-context.png" alt="ContextHub ontology and graph data exposed to AI through MCP" width="100%">
+</p>
+
+The intended MCP integration gives AI agents a shared understanding of objects, relationships,
+and business context instead of a collection of disconnected records. The protocol and tool
+contracts are implemented; wiring those tools to the persisted graph repository is listed in
+[Project status](#project-status).
+
+## Core capabilities
+
+### Ontology modeling
+
+- Object types with typed, required, unique, identity, and indexed properties
+- Link types with direction, source/target types, cardinality, and link properties
+- Interfaces with inheritance and multiple implementations
+- Shared properties, value types, structs, enums, lists, and derived properties
+- Read-only Functions using controlled expressions, external gRPC providers, or sandboxed WASM
+- Optimistic draft revisions, validation, immutable publishing, and visual canvas persistence
+- Multiple independent ontologies per workspace
+
+### Data integration
+
+- JSON, NDJSON, CSV, and Parquet uploads
+- Resumable multipart uploads up to 5 GiB
+- REST connectors with headers, parameters, retries, pagination, and SSRF boundaries
+- GraphQL connectors with variables, record paths, and cursor pagination
+- Bounded backend previews and automatic field/type detection
+- Encrypted REST and GraphQL credentials using AES-256-GCM envelopes
+- Shared workspace sources with revisioned, ontology-specific mapping plans
+
+### Mapping and ingestion
+
+- Apache Arrow as the common in-memory and streaming representation
+- Apache DataFusion for restricted, ontology-aware transformations
+- Ordered transforms: casts, trimming, casing, replacement, regex, defaults, coalescing,
+  concatenation, arithmetic, and date/timestamp parsing
+- Per-field strategies: **Skip row**, **Use null**, or **Abort import**
+- Cross-object mappings and list-valued relationship expansion
+- Missing-target strategies: **Create**, **Skip**, or **Error**
+- Idempotent stable IDs, worker leases, fenced writes, checkpoints, and resumable batches
+
+### Graph exploration
+
+- 2D and 3D visualization backed by the same graph model
+- Search, zoom, pan, rotation, history, type filters, and node-focused neighborhoods
+- Visual filters, projections, sorting, aggregations, and directed traversals
+- Parameterized ClickHouse SQL compilation—no public raw SQL endpoint
+- Property-level provenance in the selected-object inspector
+- Default visualization budgets of 5,000 nodes in 2D and 2,000 nodes in 3D
+
+## Architecture
+
+ContextHub is a monorepo with a Next.js frontend, a Rust workspace, public Protobuf contracts,
+and a reproducible Devcontainer. ClickHouse is both the control plane and graph store; MinIO is
+the local S3-compatible object store for uploaded source files and WASM artifacts.
+
+```mermaid
+flowchart LR
+    Browser["Next.js browser UI"]
+    Native["Native gRPC clients"]
+    Agent["AI agents"]
+    Sources["JSON · NDJSON · CSV · Parquet<br/>REST · GraphQL"]
+
+    subgraph Rust["Rust services"]
+        API["Tonic API<br/>gRPC + gRPC-Web"]
+        Domain["Ontology domain<br/>validation + publishing"]
+        Worker["Ingestion worker<br/>leases + checkpoints"]
+        Graph["GraphService<br/>typed query compiler"]
+        MCP["Read-only MCP server<br/>tool contracts"]
+    end
+
+    Arrow["Apache Arrow<br/>RecordBatch streams"]
+    Fusion["Apache DataFusion<br/>restricted mapping plans"]
+    ClickHouse[("ClickHouse<br/>metadata + graph + indices")]
+    MinIO[("MinIO / S3<br/>source objects + artifacts")]
+
+    Browser -->|"gRPC-Web"| API
+    Native -->|"gRPC"| API
+    Agent -->|"MCP"| MCP
+    API --> Domain
+    API --> Worker
+    API --> Graph
+    Sources --> API
+    API --> MinIO
+    MinIO --> Worker
+    Worker --> Arrow --> Fusion --> ClickHouse
+    Domain --> ClickHouse
+    Graph --> ClickHouse
+    MCP -. "repository wiring pending" .-> Graph
+```
+
+### Ingestion lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant UI as Next.js UI
+    participant API as Rust gRPC API
+    participant Store as MinIO / S3
+    participant Map as Arrow + DataFusion
+    participant CH as ClickHouse
+
+    User->>UI: Select a source and ontology
+    UI->>API: Upload source / request preview
+    API->>Store: Persist original object and checksum
+    API-->>UI: Bounded schema and record preview
+    User->>UI: Map properties and relationships
+    UI->>API: Publish ontology and save MappingPlan
+    API->>CH: Store immutable version and mapping
+    UI->>API: Start ingestion job
+    API->>Store: Stream and checksum source
+    API->>Map: Produce Arrow RecordBatches
+    Map->>Map: Apply restricted transformations
+    Map->>CH: Batch-write nodes, edges, indices, and events
+    API-->>UI: Job counters and completion state
+    UI->>API: Query active ontology version
+    API->>CH: Execute bounded parameterized graph query
+    CH-->>UI: Objects, relationships, and provenance
+```
+
+### Shared sources, isolated semantics
+
+```mermaid
+flowchart TB
+    Workspace["Workspace"]
+    SourceA["Shared source A"]
+    SourceB["Shared source B"]
+    OntologyA["Ontology: Service Map"]
+    OntologyB["Ontology: Customer 360"]
+    MappingA["Service-specific mapping"]
+    MappingB["Customer-specific mapping"]
+    GraphA[("Versioned Service graph")]
+    GraphB[("Versioned Customer graph")]
+
+    Workspace --> SourceA
+    Workspace --> SourceB
+    Workspace --> OntologyA
+    Workspace --> OntologyB
+    SourceA --> MappingA
+    SourceA --> MappingB
+    OntologyA --> MappingA --> GraphA
+    OntologyB --> MappingB --> GraphB
+```
+
+The interpretation never lives on the source itself. `ontology_data_mappings` associates a
+shared source with one ontology and owns the mapping plan. Graph nodes, edges, property indices,
+jobs, and provenance remain scoped to the corresponding immutable ontology version.
+
+## Nova Commerce demo
+
+The repository includes a deterministic fictional commerce platform designed to exercise the
+entire workflow:
+
+| Metric | Value |
+| --- | ---: |
+| Source records | 144 services |
+| Object types | Service, Team |
+| Imported graph objects | 152 |
+| `owned_by` relationships | 144 |
+| `depends_on` relationships | 432 |
+| Total relationships | 576 |
+| Rejected records | 0 |
+
+- Dataset: [`demo/data/nova-commerce.json`](demo/data/nova-commerce.json)
+- Demo guide: [`demo/README.md`](demo/README.md)
+- Tour script: [`demo/TOUR.md`](demo/TOUR.md)
+- Final narrated tour: [`context-hub-demo-tour-en-final.mp4`](demo/assets/context-hub-demo-tour-en-final.mp4)
+- All screenshots: [`demo/assets/screenshots/`](demo/assets/screenshots/)
+
+Regenerate the deterministic dataset with:
+
+```bash
+node scripts/generate-demo-data.mjs
+```
 
 ## Quick start
 
-The preferred path is **Dev Containers: Reopen in Container**. Docker Compose starts ClickHouse and MinIO, while the post-create hook installs JavaScript and Rust dependencies and generates the TypeScript Protobuf files.
+### Prerequisites
 
-Inside the container:
+- Docker Desktop
+- VS Code with the Dev Containers extension
+
+The recommended setup is **Dev Containers: Reopen in Container**. The container installs the
+pinned Node.js, pnpm, Rust, and Buf toolchains through `mise`; Docker Compose starts ClickHouse
+and MinIO. Local development uses a fixed development identity through `AUTH_MODE=dev`, so no
+separate authentication provider is required.
+
+Inside the Devcontainer, open three terminals:
 
 ```bash
+# Terminal 1 — Rust API and gRPC-Web
 mise run dev:api
+
+# Terminal 2 — read-only MCP server
 mise run dev:mcp
+
+# Terminal 3 — Next.js frontend
 mise run dev:web
 ```
 
-Open:
+Then open:
 
-- Web UI: <http://localhost:3000>
-- gRPC/gRPC-Web: `localhost:50051`
-- MCP: <http://localhost:8080/mcp>
-- MinIO console: <http://localhost:9001>
-- ClickHouse HTTP: <http://localhost:8123>
+| Service | URL |
+| --- | --- |
+| ContextHub UI | <http://localhost:3000> |
+| gRPC / gRPC-Web | `localhost:50051` |
+| MCP endpoint | <http://localhost:8080/mcp> |
+| MinIO console | <http://localhost:9001> |
+| ClickHouse HTTP | <http://localhost:8123> |
 
-Run all checks with `mise run check`.
+> [!TIP]
+> If `mise` is not available, verify that VS Code is attached to the Devcontainer rather than
+> running the commands in a host terminal.
 
-## Quality and scale checks
+## Developer commands
 
-The durable Playwright journey uploads JSON, creates the ontology mapping, runs the backend import, and verifies the resulting Explorer. Rebuild the Devcontainer once after pulling these browser dependencies, start the normal local API and web processes, then run:
+| Command | Purpose |
+| --- | --- |
+| `mise run check` | Rust, frontend, Protobuf, tests, and target-size checks |
+| `mise run test:e2e` | Playwright journey from upload to persisted Explorer graph |
+| `mise run benchmark:graph` | Reference ClickHouse graph benchmark |
+| `mise run check:target` | Warn at 8 GiB and fail at the configured Rust target limit |
+| `mise run db:up` | Start ClickHouse and MinIO |
+| `mise run db:down` | Stop local infrastructure |
+| `cargo clean` | Reclaim generated Rust build artifacts when needed |
+
+### Quality and scale
+
+The reference workload contains **1,000,000 nodes and 5,000,000 edges**. The benchmark measures
+concurrent property-index lookups plus one-hop and two-hop traversals and writes machine-readable
+reports to `benchmark-results/`.
 
 ```bash
-mise run test:e2e
-```
-
-The scale runner creates a dedicated benchmark scope in ClickHouse and replaces only data carrying its fixed benchmark workspace ID. Its defaults are the reference workload of 1,000,000 nodes and 5,000,000 edges. It measures concurrent property-index lookups plus one- and two-hop traversals and writes a JSON report below `benchmark-results/`. The scheduled workflow retains both a single-client baseline and a 16-client load profile:
-
-```bash
+# Full reference workload
 mise run benchmark:graph
-node scripts/benchmark-graph.mjs --nodes=10000 --edges-per-node=5 --iterations=10 --concurrency=4 --assert
+
+# Smaller local smoke run
+node scripts/benchmark-graph.mjs \
+  --nodes=10000 \
+  --edges-per-node=5 \
+  --iterations=10 \
+  --concurrency=4 \
+  --assert
 ```
 
-`mise run check:target` reports the largest Rust build profiles, warns above 8 GiB, and fails above the configurable 16 GiB hard limit. CI uses an 8 GiB limit. The workspace disables incremental compilation and debug symbols for dev/test builds because Arrow and DataFusion otherwise grow `target` quickly. If the local warning persists, `cargo clean` safely reclaims generated Rust artifacts; the next build recreates them.
+GitHub Actions runs Rust, frontend, Protobuf, clean ingestion E2E, and scale smoke checks.
+Pull requests additionally run Buf breaking-change detection. The full reference workload runs
+weekly and through manual workflow dispatch.
 
-GitHub Actions runs Rust, frontend and Protobuf checks, a clean end-to-end import, and a smaller scale smoke test on every change. Pull requests are checked for Protobuf breaking changes against their target branch. The exact million-node/five-million-edge workload runs weekly and on manual dispatch in `.github/workflows/scale.yml`.
+## Security boundaries
+
+- Workspace and ontology-version scopes are applied to every graph operation.
+- Query values are bound parameters; callers never receive raw SQL access.
+- Public traversals are bounded to a maximum depth of six.
+- Remote connectors reject local/private destinations, validate redirects, pin DNS answers,
+  and enforce page, response-size, and timeout limits.
+- Sensitive connector headers are encrypted outside public connector configuration.
+- Uploaded objects are size- and SHA-256-verified while streaming.
+- WASM Functions run without WASI or host imports and use memory and fuel limits.
+- MCP tool annotations and intended graph access are read-only.
+- Production authentication is expected to provide a JWT validator; local development uses
+  `AUTH_MODE=dev` only.
 
 ## Repository map
 
 ```text
-apps/web/                    Next.js UI
-crates/context-hub-domain/  Ontology types and validation
-crates/context-hub-mapping/ Mapping plans and DataFusion execution
-crates/context-hub-storage/ ClickHouse adapters and graph query compiler
-crates/context-hub-api/     gRPC and gRPC-Web server
-crates/context-hub-mcp/     Read-only MCP HTTP server
-proto/                      Public API contracts
-infra/                      ClickHouse bootstrap schema
-.devcontainer/              Reproducible developer environment
+apps/web/                    Next.js 16, React 19, React Flow, 2D/3D Explorer
+crates/context-hub-domain/  Ontology types, validation, and publish rules
+crates/context-hub-mapping/ Mapping plans, Arrow streaming, and DataFusion execution
+crates/context-hub-storage/ ClickHouse repositories and graph query compiler
+crates/context-hub-api/     Tonic gRPC and gRPC-Web API
+crates/context-hub-mcp/     Read-only MCP HTTP server and tool contracts
+proto/                      Public Protobuf API contracts
+infra/clickhouse/           Unified control-plane and graph schema
+docs/                       Focused architecture and feature documentation
+demo/                       Nova Commerce dataset, screenshots, and video tour
+.devcontainer/              Reproducible development environment
 ```
 
-## V1 boundaries
+## Documentation
 
-Actions, scenarios, GeoPoint/GeoShape, Attachment/MediaReference, status/render metadata, write-capable MCP tools, direct database connectors, and arbitrary user SQL are deliberately excluded. Functions are included as read-only expression, external gRPC, or WASM definitions. ConnectorX is reserved for a later direct-database connector milestone.
+| Topic | Document |
+| --- | --- |
+| Architecture and tenancy | [`docs/architecture.md`](docs/architecture.md) |
+| Robust and resumable imports | [`docs/robust-imports.md`](docs/robust-imports.md) |
+| Mapping transformations | [`docs/mapping-transformations.md`](docs/mapping-transformations.md) |
+| Parquet imports | [`docs/parquet-imports.md`](docs/parquet-imports.md) |
+| REST connectors | [`docs/rest-connectors.md`](docs/rest-connectors.md) |
+| GraphQL connectors | [`docs/graphql-connectors.md`](docs/graphql-connectors.md) |
+| Data-source management | [`docs/data-source-management.md`](docs/data-source-management.md) |
+| Graph Query Builder | [`docs/graph-query-builder.md`](docs/graph-query-builder.md) |
+| Import history and provenance | [`docs/import-history-provenance.md`](docs/import-history-provenance.md) |
+| Function execution | [`docs/function-execution.md`](docs/function-execution.md) |
 
-The browser uploads selected JSON, NDJSON, CSV, and Parquet files to the backend and stores them durably in MinIO. Text formats are parsed locally for an immediate mapping preview. Parquet is decoded by the backend into a bounded JSON preview while its original columnar bytes remain Arrow-native for DataFusion ingestion. REST and GraphQL sources are fetched and normalized by the backend so browser CORS rules do not affect the mapping workflow. `IngestionService.Start` loads the shared source through its connector, maps it with Arrow/DataFusion, and persists the ontology-version-scoped graph in ClickHouse. See [Parquet imports](docs/parquet-imports.md).
+## Project status
 
-The **Data sources** workspace view lists every saved source and the ontology mappings that use it. Sources can be tested and renamed there; REST and GraphQL configurations can also be edited. Deletion is allowed only when no ontology mapping references the source, and deleting an upload removes its MinIO object. See [Data source management](docs/data-source-management.md).
+| Area | Status |
+| --- | --- |
+| Ontology editor and immutable publishing | Implemented |
+| Shared sources and ontology-specific mappings | Implemented |
+| File, REST, GraphQL, and Parquet ingestion | Implemented |
+| Arrow/DataFusion transformations and error strategies | Implemented |
+| ClickHouse graph storage, indices, queries, and provenance | Implemented |
+| 2D/3D Explorer and visual Query Builder | Implemented |
+| Controlled expression, external gRPC, and WASM Functions | Implemented |
+| Durable E2E, CI, and graph benchmark | Implemented |
+| MCP protocol and read-only tool contracts | Implemented |
+| MCP connection to the persisted GraphService repository | **Next integration step** |
+| Production JWT integration and key rotation operations | **Deployment integration** |
 
-The Explorer includes a visual graph-query builder for ontology-validated filters, property projections, sorting, bounded aggregations, and directed traversals. Selected nodes can load their one-hop neighborhood from ClickHouse without replacing the current 2D/3D graph. See [Graph query builder](docs/graph-query-builder.md).
+### Deliberate V1 boundaries
 
-The **Imports** view shows durable job history, counters, timestamps, field/row errors, source details, and a retry action that creates a separate audit record. Selecting a graph node resolves each directly mapped property back to its shared source, source field, mapping, and successful ingestion job. See [Import history and provenance](docs/import-history-provenance.md).
+Actions, scenarios, GeoPoint/GeoShape, Attachment/MediaReference, status/render metadata,
+write-capable MCP tools, direct database connectors, cross-ontology federation, and arbitrary
+user SQL are intentionally excluded from V1. ConnectorX is reserved for a later direct-database
+connector milestone.
 
-The ontology editor publishes Function definitions with typed inputs and outputs and can execute the published version from its inspector. Function nodes can be duplicated or deleted. Expressions use a fixed language rather than SQL or shell access and are validated during publish. External providers implement the `ExternalFunctionService` envelope and can be tested before publishing; WASM artifacts are uploaded and managed in the inspector, read from MinIO, and execute without WASI or host imports. Execution results and detailed failures are available in the Function history. See [Function execution](docs/function-execution.md).
+---
 
-Ontology canvas state is stored with the definition in the revisioned ClickHouse draft. The editor reconstructs older definitions that have no compatible layout, migrates legacy browser-local drafts once, and autosaves only documents that differ from the last backend-confirmed state. Object types, links, interfaces, value types, structs, shared and derived properties, and Functions survive reloads without being flattened. Node/property deletion and bounded Undo/Redo are available before publish.
+<div align="center">
 
-The browser import action now executes the complete backend sequence: publish the selected ontology, save its source-specific mapping, start DataFusion ingestion, poll the durable job, and open the local graph preview after success. Ontologies, versions, source metadata, mappings, job results, and graph data survive restarts. Workspace upload sources are listed from ClickHouse after a browser refresh; selecting one checksum-validates and restores its original MinIO object into the mapping assistant. The explorer reloads the active-version graph through `GraphService` in 2,000-object keyset pages. Users can incrementally merge additional pages into the current 2D/3D view without reloading already completed query branches.
+**ContextHub connects ontology, data integration, provenance, graph exploration, and AI-ready context.**
 
-The worker executes every Object Mapping in one mapping bundle over shared Arrow batches. It merges nodes across plans before resolving links, so references can target objects produced by another plan in the same job. List-valued references expand into individual edges, and the visual missing-target strategies Create, Skip, and Error are enforced by the worker. Each property can use an ordered pipeline of casts, string operations, defaults, field combinations, arithmetic, and date parsing; the browser preview applies the same ordering before the plan is compiled for DataFusion. Legacy single-transform browser drafts and single-plan backend mappings remain readable. Uploaded objects are checksum-verified while streaming to bounded temporary storage; JSON arrays are normalized incrementally and JSON/NDJSON, CSV, and Parquet are mapped Arrow batch by Arrow batch. Workers use expiring fenced leases and persist node/edge checkpoints after every ClickHouse batch, allowing another replica to resume without repeating completed batches. Sensitive REST/GraphQL headers are AES-256-GCM encrypted outside `configuration_json`. See [Robust imports](docs/robust-imports.md), [REST connectors](docs/rest-connectors.md), and [GraphQL connectors](docs/graphql-connectors.md).
+</div>
