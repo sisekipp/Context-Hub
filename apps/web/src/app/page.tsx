@@ -1,15 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Boxes, DatabaseZap, Orbit, Plus, Workflow } from "lucide-react";
+import { Boxes, Database, DatabaseZap, Orbit, Plus, Workflow } from "lucide-react";
+import { DataSourceManager } from "@/components/data-source-manager";
 import { GraphExplorer } from "@/components/graph-explorer";
 import { MappingPanel, parseSource, type BrowserDataSource } from "@/components/mapping-panel";
 import { OntologyEditor } from "@/components/ontology-editor";
 import { emptyGraph, type ImportedGraph } from "@/lib/graph-data";
 import { defaultOntologyCatalog, type OntologyCatalog } from "@/lib/ontology-catalog";
-import { createWorkspaceOntology, downloadWorkspaceSource, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph, previewWorkspaceSource } from "@/lib/context-hub-client";
+import { createWorkspaceOntology, downloadWorkspaceSource, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph, previewWorkspaceSource, type BackendDataSource } from "@/lib/context-hub-client";
 
-type Section = "ontology" | "mapping" | "graph";
+type Section = "ontology" | "sources" | "mapping" | "graph";
 type OntologyWorkspace = { id: string; name: string; slug: string; activeVersionId: string };
 
 const ontologyRegistryKey = "context-hub.ontology-registry";
@@ -57,6 +58,7 @@ function saveRegistry(registry: typeof defaultRegistry) {
 
 const sections: Array<{ id: Section; label: string; icon: typeof Workflow }> = [
   { id: "ontology", label: "Ontology", icon: Workflow },
+  { id: "sources", label: "Data sources", icon: Database },
   { id: "mapping", label: "Data mapping", icon: DatabaseZap },
   { id: "graph", label: "Explore", icon: Orbit },
 ];
@@ -66,6 +68,7 @@ export default function Home() {
   const [catalogs, setCatalogs] = useState<Record<string, OntologyCatalog>>({ [defaultOntology.id]: defaultOntologyCatalog });
   const [graphs, setGraphs] = useState<Record<string, ImportedGraph>>({});
   const [dataSources, setDataSources] = useState<BrowserDataSource[]>([]);
+  const [backendDataSources, setBackendDataSources] = useState<BackendDataSource[]>([]);
   const [activeDataSourceId, setActiveDataSourceId] = useState("");
   const [loadingMoreGraph, setLoadingMoreGraph] = useState(false);
   const graphRequests = useRef(new Set<string>());
@@ -80,6 +83,15 @@ export default function Home() {
   const updateActiveCatalog = useCallback((catalog: OntologyCatalog) => {
     setCatalogs((items) => ({ ...items, [activeOntology.id]: catalog }));
   }, [activeOntology.id]);
+
+  const refreshDataSources = useCallback(async () => {
+    const sources = await listWorkspaceDataSources();
+    setBackendDataSources(sources);
+    setDataSources((current) => sources.map((source) => {
+      const existing = current.find((item) => item.id === source.id);
+      return { id: source.id, fileName: source.fileName, kind: source.kind, records: existing?.records ?? [] };
+    }));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,11 +118,12 @@ export default function Home() {
     void listWorkspaceDataSources()
       .then((sources) => {
         if (cancelled) return;
+        setBackendDataSources(sources);
         setDataSources(sources.map((source) => ({ id: source.id, fileName: source.fileName, kind: source.kind, records: [] })));
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
-  }, []);
+  }, [refreshDataSources]);
 
   useEffect(() => {
     if (section !== "graph" || graphs[activeOntology.id] || !activeOntology.activeVersionId || !activeCatalog.objectTypes.length || graphRequests.current.has(activeOntology.id)) return;
@@ -139,6 +152,7 @@ export default function Home() {
   function registerDataSource(source: BrowserDataSource) {
     setDataSources((items) => [...items.filter((item) => item.id !== source.id), source]);
     setActiveDataSourceId(source.id);
+    void refreshDataSources();
   }
 
   async function selectDataSource(id: string) {
@@ -197,6 +211,11 @@ export default function Home() {
       </aside>
       <section className="main-stage">
         <div className={section === "ontology" ? "section-pane active" : "section-pane"}><OntologyEditor key={activeOntology.id} ontologyId={activeOntology.id} ontologyName={activeOntology.name} seedTemplate={activeOntology.slug === defaultOntology.slug} onRename={renameOntology} onCatalogChange={updateActiveCatalog} /></div>
+        {section === "sources" && <DataSourceManager
+          sources={backendDataSources}
+          onChanged={refreshDataSources}
+          onUseForMapping={(id) => { void selectDataSource(id); setSection("mapping"); }}
+        />}
         {section === "mapping" && <MappingPanel key={`${activeOntology.id}:${activeDataSource?.id ?? "new"}`} ontologyId={activeOntology.id} ontologyName={activeOntology.name} ontologySlug={activeOntology.slug} ontology={activeCatalog} dataSource={activeDataSource} onDataSourceLoaded={registerDataSource} onImport={(imported) => { setGraphs((items) => ({ ...items, [activeOntology.id]: imported })); setSection("graph"); }} />}
         {section === "graph" && <GraphExplorer graph={activeGraph} onOpenMapping={() => setSection("mapping")} onOpenOntology={() => setSection("ontology")} onLoadMore={loadMoreGraph} canLoadMore={!!activeGraph.pagination?.hasMore} loadingMore={loadingMoreGraph} />}
       </section>

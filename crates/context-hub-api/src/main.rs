@@ -4,14 +4,16 @@ use chrono::{DateTime, NaiveDate, Utc};
 #[cfg(test)]
 use context_hub_api::context_hub::v1::GraphFilter as ApiGraphFilter;
 use context_hub_api::context_hub::v1::{
-    CreateOntologyRequest, DataSource, GetIngestionJobRequest, GetObjectRequest,
-    GetOntologyDraftRequest, GetUploadDataSourceRequest, GetUploadDataSourceResponse,
-    GetWorkspaceRequest, GraphEdge, GraphNode, GraphQuery, ImportGraphRequest, IngestionJob,
-    IngestionState, ListDataSourcesRequest, ListDataSourcesResponse, ListOntologiesRequest,
-    ListOntologiesResponse, ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse,
-    ListOntologyVersionsRequest, ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology,
-    OntologyDataMapping, OntologyDraft, OntologyVersion, PreviewDataSourceRequest,
-    PreviewDataSourceResponse, PublishOntologyRequest, QueryGraphResponse, SaveDataSourceRequest,
+    CreateOntologyRequest, DataSource, DataSourceUsage, DeleteDataSourceRequest,
+    GetDataSourceUsageRequest, GetDataSourceUsageResponse, GetIngestionJobRequest,
+    GetObjectRequest, GetOntologyDraftRequest, GetUploadDataSourceRequest,
+    GetUploadDataSourceResponse, GetWorkspaceRequest, GraphEdge, GraphNode, GraphQuery,
+    ImportGraphRequest, IngestionJob, IngestionState, ListDataSourcesRequest,
+    ListDataSourcesResponse, ListOntologiesRequest, ListOntologiesResponse,
+    ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse, ListOntologyVersionsRequest,
+    ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology, OntologyDataMapping,
+    OntologyDraft, OntologyVersion, PreviewDataSourceRequest, PreviewDataSourceResponse,
+    PublishOntologyRequest, QueryGraphResponse, SaveDataSourceRequest,
     SaveOntologyDataMappingRequest, SaveOntologyDraftRequest, StartIngestionRequest,
     UploadDataSourceRequest, UploadDataSourceResponse, ValidateOntologyRequest,
     ValidateOntologyResponse, ValidationIssue, Workspace,
@@ -310,6 +312,18 @@ impl Runtime {
         if let Some(repository) = &self.control_plane {
             repository
                 .save_data_source(
+                    &stored_data_source(value, persistence_revision()).map_err(storage_status)?,
+                )
+                .await
+                .map_err(storage_status)?;
+        }
+        Ok(())
+    }
+
+    async fn delete_persisted_data_source(&self, value: &DataSource) -> Result<(), Status> {
+        if let Some(repository) = &self.control_plane {
+            repository
+                .delete_data_source(
                     &stored_data_source(value, persistence_revision()).map_err(storage_status)?,
                 )
                 .await
@@ -906,6 +920,18 @@ impl DataSourceService for Runtime {
             .into_inner()
             .data_source
             .ok_or_else(|| Status::invalid_argument("data_source is required"))?;
+        let existing = if source.id.is_empty() {
+            None
+        } else {
+            Some(
+                self.data_sources
+                    .read()
+                    .await
+                    .get(&source.id)
+                    .cloned()
+                    .ok_or_else(|| Status::not_found("data source not found"))?,
+            )
+        };
         if source.id.is_empty() {
             source.id = Uuid::new_v4().to_string();
         }
@@ -917,6 +943,18 @@ impl DataSourceService for Runtime {
         }
         if source.name.trim().is_empty() {
             return Err(Status::invalid_argument("data source name is required"));
+        }
+        if let Some(existing) = &existing {
+            if source.workspace_id != existing.workspace_id || source.kind != existing.kind {
+                return Err(Status::failed_precondition(
+                    "workspace and data source kind cannot be changed",
+                ));
+            }
+            if source.kind == 1 && source.configuration_json != existing.configuration_json {
+                return Err(Status::failed_precondition(
+                    "uploaded file configuration cannot be changed; only its name can be edited",
+                ));
+            }
         }
         match source.kind {
             1 => {}
@@ -952,6 +990,88 @@ impl DataSourceService for Runtime {
             .await
             .insert(source.id.clone(), source.clone());
         Ok(Response::new(source))
+    }
+
+    async fn get_usage(
+        &self,
+        request: Request<GetDataSourceUsageRequest>,
+    ) -> Result<Response<GetDataSourceUsageResponse>, Status> {
+        let id = request.into_inner().id;
+        let source = self
+            .data_sources
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("data source not found"))?;
+        if source.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        let ontologies = self.ontologies.read().await;
+        let mut usages = self
+            .mappings
+            .read()
+            .await
+            .values()
+            .filter(|mapping| mapping.data_source_id == id)
+            .map(|mapping| DataSourceUsage {
+                ontology_id: mapping.ontology_id.clone(),
+                ontology_name: ontologies.get(&mapping.ontology_id).map_or_else(
+                    || "Unknown ontology".into(),
+                    |ontology| ontology.name.clone(),
+                ),
+                mapping_id: mapping.id.clone(),
+                mapping_name: mapping.name.clone(),
+            })
+            .collect::<Vec<_>>();
+        usages.sort_by(|left, right| {
+            left.ontology_name
+                .cmp(&right.ontology_name)
+                .then(left.mapping_name.cmp(&right.mapping_name))
+        });
+        Ok(Response::new(GetDataSourceUsageResponse {
+            data_source: Some(source),
+            usages,
+        }))
+    }
+
+    async fn delete(
+        &self,
+        request: Request<DeleteDataSourceRequest>,
+    ) -> Result<Response<()>, Status> {
+        let id = request.into_inner().id;
+        let source = self
+            .data_sources
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("data source not found"))?;
+        if source.workspace_id != dev_workspace_id() {
+            return Err(Status::permission_denied("workspace is not accessible"));
+        }
+        let usage_count = self
+            .mappings
+            .read()
+            .await
+            .values()
+            .filter(|mapping| mapping.data_source_id == id)
+            .count();
+        if usage_count > 0 {
+            return Err(Status::failed_precondition(format!(
+                "data source is used by {usage_count} ontology mapping(s)"
+            )));
+        }
+        self.delete_persisted_data_source(&source).await?;
+        self.data_sources.write().await.remove(&id);
+        if source.kind == 1
+            && let Ok(configuration) =
+                serde_json::from_str::<UploadSourceConfiguration>(&source.configuration_json)
+            && let Err(error) = self.source_store.delete(&configuration.object_key).await
+        {
+            tracing::warn!(data_source_id = %id, %error, "could not remove deleted source object");
+        }
+        Ok(Response::new(()))
     }
 
     async fn upload(
@@ -2429,6 +2549,92 @@ mod tests {
         assert_ne!(first_mappings[0].id, second_mappings[0].id);
         assert_eq!(first_mappings[0].ontology_id, first.id);
         assert_eq!(second_mappings[0].ontology_id, second.id);
+
+        let usages = runtime
+            .get_usage(Request::new(GetDataSourceUsageRequest {
+                id: source.id.clone(),
+            }))
+            .await
+            .expect("source usage can be inspected")
+            .into_inner()
+            .usages;
+        assert_eq!(usages.len(), 2);
+        assert!(usages.iter().any(|usage| usage.ontology_name == first.name));
+        assert!(
+            usages
+                .iter()
+                .any(|usage| usage.ontology_name == second.name)
+        );
+        let error = runtime
+            .delete(Request::new(DeleteDataSourceRequest {
+                id: source.id.clone(),
+            }))
+            .await
+            .expect_err("a mapped source cannot be deleted");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(runtime.data_sources.read().await.contains_key(&source.id));
+    }
+
+    #[tokio::test]
+    async fn unused_upload_can_be_renamed_and_deleted_with_its_object() {
+        let source_store = Arc::new(MemorySourceObjectStore::default());
+        let runtime = Runtime::seeded_with_stores(
+            Arc::new(MemoryGraphRepository::default()),
+            source_store.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let source = runtime
+            .upload(Request::new(UploadDataSourceRequest {
+                workspace_id: dev_workspace_id(),
+                name: "Temporary export".into(),
+                file_name: "temporary.json".into(),
+                format: 1,
+                content: br#"[{"id":"temporary"}]"#.to_vec(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .data_source
+            .unwrap();
+        let configuration: UploadSourceConfiguration =
+            serde_json::from_str(&source.configuration_json).unwrap();
+        let renamed = runtime
+            .save(Request::new(SaveDataSourceRequest {
+                data_source: Some(DataSource {
+                    name: "Renamed export".into(),
+                    ..source.clone()
+                }),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(renamed.name, "Renamed export");
+        assert_eq!(
+            runtime
+                .preview(Request::new(PreviewDataSourceRequest {
+                    id: source.id.clone(),
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .record_count,
+            1
+        );
+
+        runtime
+            .delete(Request::new(DeleteDataSourceRequest {
+                id: source.id.clone(),
+            }))
+            .await
+            .unwrap();
+
+        assert!(!runtime.data_sources.read().await.contains_key(&source.id));
+        assert!(matches!(
+            source_store.get(&configuration.object_key).await,
+            Err(StorageError::NotFound)
+        ));
     }
 
     #[tokio::test]

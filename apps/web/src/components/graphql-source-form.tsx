@@ -53,8 +53,9 @@ export function validateGraphqlSourceInput(source: GraphqlSourceInput) {
   return "";
 }
 
-export function GraphqlSourceForm({ onClose, onCreated }: { onClose: () => void; onCreated: (source: GraphqlBrowserSource) => void }) {
-  const [source, setSource] = useState(initialSource);
+export function GraphqlSourceForm({ onClose, onCreated, onSaved, initialValue }: { onClose: () => void; onCreated?: (source: GraphqlBrowserSource) => void; onSaved?: () => void; initialValue?: GraphqlSourceInput }) {
+  const editing = !!initialValue?.id;
+  const [source, setSource] = useState(() => initialValue ?? initialSource);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const update = (patch: Partial<GraphqlSourceInput>) => setSource((current) => ({ ...current, ...patch }));
@@ -67,6 +68,11 @@ export function GraphqlSourceForm({ onClose, onCreated }: { onClose: () => void;
     setMessage("Saving source and executing a bounded GraphQL preview…");
     try {
       const saved = await saveWorkspaceGraphqlSource(source);
+      if (!onCreated) {
+        onSaved?.();
+        onClose();
+        return;
+      }
       const preview = await previewWorkspaceSource(saved.id);
       const value = JSON.parse(new TextDecoder().decode(preview.content)) as unknown;
       if (!Array.isArray(value)) throw new Error("The GraphQL preview did not return a record array.");
@@ -87,7 +93,7 @@ export function GraphqlSourceForm({ onClose, onCreated }: { onClose: () => void;
 
   return <div className="rest-source-overlay" role="presentation">
     <form className="rest-source-dialog graphql-source-dialog" onSubmit={submit} aria-label="GraphQL data source">
-      <div className="rest-dialog-header"><div><span className="eyebrow">Workspace source</span><h2><Braces size={18}/> Connect GraphQL</h2><p>Execute a controlled query through the secured backend connector.</p></div><button type="button" aria-label="Close GraphQL source" onClick={onClose}><X size={17}/></button></div>
+      <div className="rest-dialog-header"><div><span className="eyebrow">Workspace source</span><h2><Braces size={18}/> {editing ? "Edit GraphQL" : "Connect GraphQL"}</h2><p>Execute a controlled query through the secured backend connector.</p></div><button type="button" aria-label="Close GraphQL source" onClick={onClose}><X size={17}/></button></div>
       <div className="rest-form-grid">
         <label>Source name<input autoFocus value={source.name} onChange={(event) => update({ name: event.target.value })} placeholder="Service catalog GraphQL"/></label>
         <label className="wide">GraphQL URL<input value={source.url} onChange={(event) => update({ url: event.target.value })} placeholder="https://api.example.com/graphql"/></label>
@@ -104,7 +110,7 @@ export function GraphqlSourceForm({ onClose, onCreated }: { onClose: () => void;
       <div className="rest-pairs graphql-headers"><div className="rest-pairs-title"><span>Headers</span><button type="button" onClick={() => update({ headers: [...source.headers, { key: "", value: "" }] })}><Plus size={12}/> Add</button></div>{source.headers.map((header, index) => <div className="rest-pair" key={`graphql-header-${index}`}><input aria-label={`GraphQL header key ${index + 1}`} placeholder="Key" value={header.key} onChange={(event) => updateHeader(index, { key: event.target.value })}/><input aria-label={`GraphQL header value ${index + 1}`} placeholder="Value" value={header.value} onChange={(event) => updateHeader(index, { value: event.target.value })}/><button type="button" aria-label={`Remove GraphQL header ${index + 1}`} onClick={() => update({ headers: source.headers.filter((_, headerIndex) => headerIndex !== index) })}><Trash2 size={12}/></button></div>)}{!source.headers.length && <small>No headers configured.</small>}</div>
       <div className="rest-security-note">Only the configured query and variables are sent. Private networks, unsafe redirects, oversized responses, and plaintext credentials are rejected.</div>
       {message && <div className="import-status" role="status">{message}</div>}
-      <div className="rest-dialog-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{busy ? "Connecting…" : "Save & preview"}</button></div>
+      <div className="rest-dialog-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{busy ? "Saving…" : editing ? "Save changes" : "Save & preview"}</button></div>
     </form>
   </div>;
 }

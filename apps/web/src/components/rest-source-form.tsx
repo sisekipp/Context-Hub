@@ -65,8 +65,9 @@ function KeyValueEditor({ label, items, onChange }: { label: string; items: Rest
   </div>;
 }
 
-export function RestSourceForm({ onClose, onCreated }: { onClose: () => void; onCreated: (source: RestBrowserSource) => void }) {
-  const [source, setSource] = useState(initialSource);
+export function RestSourceForm({ onClose, onCreated, onSaved, initialValue }: { onClose: () => void; onCreated?: (source: RestBrowserSource) => void; onSaved?: () => void; initialValue?: RestSourceInput }) {
+  const editing = !!initialValue?.id;
+  const [source, setSource] = useState(() => initialValue ?? initialSource);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const update = (patch: Partial<RestSourceInput>) => setSource((current) => ({ ...current, ...patch }));
@@ -79,6 +80,11 @@ export function RestSourceForm({ onClose, onCreated }: { onClose: () => void; on
     setMessage("Saving source and loading a bounded preview…");
     try {
       const saved = await saveWorkspaceRestSource(source);
+      if (!onCreated) {
+        onSaved?.();
+        onClose();
+        return;
+      }
       const preview = await previewWorkspaceSource(saved.id);
       const value = JSON.parse(new TextDecoder().decode(preview.content)) as unknown;
       if (!Array.isArray(value)) throw new Error("The REST preview did not return a record array.");
@@ -95,7 +101,7 @@ export function RestSourceForm({ onClose, onCreated }: { onClose: () => void; on
 
   return <div className="rest-source-overlay" role="presentation">
     <form className="rest-source-dialog" onSubmit={submit} aria-label="REST data source">
-      <div className="rest-dialog-header"><div><span className="eyebrow">Workspace source</span><h2><Globe2 size={18}/> Connect REST API</h2><p>Fetch bounded JSON through the secured backend connector.</p></div><button type="button" aria-label="Close REST source" onClick={onClose}><X size={17}/></button></div>
+      <div className="rest-dialog-header"><div><span className="eyebrow">Workspace source</span><h2><Globe2 size={18}/> {editing ? "Edit REST API" : "Connect REST API"}</h2><p>Fetch bounded JSON through the secured backend connector.</p></div><button type="button" aria-label="Close REST source" onClick={onClose}><X size={17}/></button></div>
       <div className="rest-form-grid">
         <label>Source name<input autoFocus value={source.name} onChange={(event) => update({ name: event.target.value })} placeholder="Service catalog API"/></label>
         <label className="wide">GET URL<input value={source.url} onChange={(event) => update({ url: event.target.value })} placeholder="https://api.example.com/services"/></label>
@@ -119,7 +125,7 @@ export function RestSourceForm({ onClose, onCreated }: { onClose: () => void; on
       <div className="rest-collections"><KeyValueEditor label="Query parameters" items={source.query} onChange={(query) => update({ query })}/><KeyValueEditor label="Headers" items={source.headers} onChange={(headers) => update({ headers })}/></div>
       <div className="rest-security-note">Private networks, unsafe redirects, oversized responses, and plaintext credential headers are rejected by the backend.</div>
       {message && <div className="import-status" role="status">{message}</div>}
-      <div className="rest-dialog-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{busy ? "Connecting…" : "Save & preview"}</button></div>
+      <div className="rest-dialog-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary" disabled={busy}>{busy ? "Saving…" : editing ? "Save changes" : "Save & preview"}</button></div>
     </form>
   </div>;
 }

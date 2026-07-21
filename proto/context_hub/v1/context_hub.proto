@@ -107,6 +107,18 @@ message DataSource {
 message ListDataSourcesRequest { string workspace_id = 1; }
 message ListDataSourcesResponse { repeated DataSource data_sources = 1; }
 message SaveDataSourceRequest { DataSource data_source = 1; }
+message GetDataSourceUsageRequest { string id = 1; }
+message DataSourceUsage {
+  string ontology_id = 1;
+  string ontology_name = 2;
+  string mapping_id = 3;
+  string mapping_name = 4;
+}
+message GetDataSourceUsageResponse {
+  DataSource data_source = 1;
+  repeated DataSourceUsage usages = 2;
+}
+message DeleteDataSourceRequest { string id = 1; }
 
 enum SourceFileFormat {
   SOURCE_FILE_FORMAT_UNSPECIFIED = 0;
@@ -161,6 +173,8 @@ message ListOntologyDataMappingsResponse { repeated OntologyDataMapping mappings
 
 service DataSourceService {
   rpc Save(SaveDataSourceRequest) returns (DataSource);
+  rpc GetUsage(GetDataSourceUsageRequest) returns (GetDataSourceUsageResponse);
+  rpc Delete(DeleteDataSourceRequest) returns (google.protobuf.Empty);
   rpc Upload(UploadDataSourceRequest) returns (UploadDataSourceResponse);
   rpc GetUpload(GetUploadDataSourceRequest) returns (GetUploadDataSourceResponse);
   rpc Preview(PreviewDataSourceRequest) returns (PreviewDataSourceResponse);

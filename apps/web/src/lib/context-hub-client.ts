@@ -26,9 +26,11 @@ const ingestions = createClient(IngestionService, transport);
 const graph = createClient(GraphService, transport);
 
 export type BackendOntology = { id: string; name: string; slug: string; activeVersionId: string };
-export type BackendDataSource = { id: string; name: string; fileName: string; kind: "upload" | "rest" | "graphql" };
+export type BackendDataSource = { id: string; name: string; fileName: string; kind: "upload" | "rest" | "graphql"; configurationJson: string };
+export type BackendDataSourceUsage = { ontologyId: string; ontologyName: string; mappingId: string; mappingName: string };
 export type RestKeyValue = { key: string; value: string };
 export type RestSourceInput = {
+  id?: string;
   name: string;
   url: string;
   recordPath: string;
@@ -47,6 +49,7 @@ export type RestSourceInput = {
   retryAttempts: number;
 };
 export type GraphqlSourceInput = {
+  id?: string;
   name: string;
   url: string;
   query: string;
@@ -111,17 +114,17 @@ export async function listWorkspaceDataSources(): Promise<BackendDataSource[]> {
   const response = await dataSources.list({ workspaceId: DEV_WORKSPACE_ID });
   return response.dataSources.flatMap<BackendDataSource>((source) => {
     if (source.kind === DataSourceKind.REST) {
-      return [{ id: source.id, name: source.name, fileName: `REST · ${source.name}.json`, kind: "rest" as const }];
+      return [{ id: source.id, name: source.name, fileName: `REST · ${source.name}.json`, kind: "rest" as const, configurationJson: source.configurationJson }];
     }
     if (source.kind === DataSourceKind.GRAPHQL) {
-      return [{ id: source.id, name: source.name, fileName: `GraphQL · ${source.name}.json`, kind: "graphql" as const }];
+      return [{ id: source.id, name: source.name, fileName: `GraphQL · ${source.name}.json`, kind: "graphql" as const, configurationJson: source.configurationJson }];
     }
     if (source.kind !== DataSourceKind.UPLOAD) return [];
     try {
       const configuration = JSON.parse(source.configurationJson) as { file_name?: string };
-      return [{ id: source.id, name: source.name, fileName: configuration.file_name || source.name, kind: "upload" as const }];
+      return [{ id: source.id, name: source.name, fileName: configuration.file_name || source.name, kind: "upload" as const, configurationJson: source.configurationJson }];
     } catch {
-      return [{ id: source.id, name: source.name, fileName: source.name, kind: "upload" as const }];
+      return [{ id: source.id, name: source.name, fileName: source.name, kind: "upload" as const, configurationJson: source.configurationJson }];
     }
   });
 }
@@ -145,7 +148,7 @@ export async function saveWorkspaceRestSource(input: RestSourceInput) {
     initial_cursor: null,
   } : { mode: "none" };
   const source = await dataSources.save({ dataSource: {
-    id: "",
+    id: input.id ?? "",
     workspaceId: DEV_WORKSPACE_ID,
     name: input.name,
     kind: DataSourceKind.REST,
@@ -161,7 +164,7 @@ export async function saveWorkspaceRestSource(input: RestSourceInput) {
       retry_attempts: input.retryAttempts,
     }),
   } });
-  return { id: source.id, name: source.name, fileName: `REST · ${source.name}.json`, kind: "rest" as const };
+  return { id: source.id, name: source.name, fileName: `REST · ${source.name}.json`, kind: "rest" as const, configurationJson: source.configurationJson };
 }
 
 export async function saveWorkspaceGraphqlSource(input: GraphqlSourceInput) {
@@ -173,7 +176,7 @@ export async function saveWorkspaceGraphqlSource(input: GraphqlSourceInput) {
     initial_cursor: null,
   } : { mode: "none" };
   const source = await dataSources.save({ dataSource: {
-    id: "",
+    id: input.id ?? "",
     workspaceId: DEV_WORKSPACE_ID,
     name: input.name,
     kind: DataSourceKind.GRAPHQL,
@@ -190,7 +193,57 @@ export async function saveWorkspaceGraphqlSource(input: GraphqlSourceInput) {
       retry_attempts: input.retryAttempts,
     }),
   } });
-  return { id: source.id, name: source.name, fileName: `GraphQL · ${source.name}.json`, kind: "graphql" as const };
+  return { id: source.id, name: source.name, fileName: `GraphQL · ${source.name}.json`, kind: "graphql" as const, configurationJson: source.configurationJson };
+}
+
+function pairs(value: unknown): RestKeyValue[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.entries(value).map(([key, entry]) => ({ key, value: String(entry ?? "") }));
+}
+
+export function restSourceInput(source: BackendDataSource): RestSourceInput {
+  const configuration = JSON.parse(source.configurationJson) as Record<string, unknown>;
+  const pagination = (configuration.pagination ?? {}) as Record<string, unknown>;
+  const mode = pagination.mode === "page" || pagination.mode === "cursor" ? pagination.mode : "none";
+  return {
+    id: source.id, name: source.name, url: String(configuration.url ?? ""), recordPath: String(configuration.record_path ?? ""),
+    headers: pairs(configuration.headers), query: pairs(configuration.query), pagination: mode,
+    pageParameter: String(pagination.parameter ?? "page"), pageStart: Number(pagination.start ?? 1),
+    pageSizeParameter: String(pagination.page_size_parameter ?? "limit"), pageSize: Number(pagination.page_size ?? 100),
+    cursorParameter: String(pagination.query_parameter ?? "cursor"), nextCursorPath: String(pagination.next_cursor_path ?? "meta.next_cursor"),
+    maxPages: Number(configuration.max_pages ?? 100), maxBytes: Number(configuration.max_bytes ?? 32 * 1024 * 1024),
+    timeoutSeconds: Number(configuration.timeout_seconds ?? 30), retryAttempts: Number(configuration.retry_attempts ?? 2),
+  };
+}
+
+export function graphqlSourceInput(source: BackendDataSource): GraphqlSourceInput {
+  const configuration = JSON.parse(source.configurationJson) as Record<string, unknown>;
+  const pagination = (configuration.pagination ?? {}) as Record<string, unknown>;
+  return {
+    id: source.id, name: source.name, url: String(configuration.url ?? ""), query: String(configuration.query ?? ""),
+    variables: JSON.stringify(configuration.variables ?? {}, null, 2), recordPath: String(configuration.record_path ?? ""),
+    headers: pairs(configuration.headers), cursorEnabled: pagination.mode === "cursor",
+    cursorVariable: String(pagination.variable ?? "after"), nextCursorPath: String(pagination.next_cursor_path ?? "data.pageInfo.endCursor"),
+    maxPages: Number(configuration.max_pages ?? 100), maxBytes: Number(configuration.max_bytes ?? 32 * 1024 * 1024),
+    timeoutSeconds: Number(configuration.timeout_seconds ?? 30), retryAttempts: Number(configuration.retry_attempts ?? 2),
+  };
+}
+
+function protoKind(kind: BackendDataSource["kind"]) {
+  return kind === "upload" ? DataSourceKind.UPLOAD : kind === "rest" ? DataSourceKind.REST : DataSourceKind.GRAPHQL;
+}
+
+export async function renameWorkspaceDataSource(source: BackendDataSource, name: string) {
+  await dataSources.save({ dataSource: { id: source.id, workspaceId: DEV_WORKSPACE_ID, name, kind: protoKind(source.kind), configurationJson: source.configurationJson } });
+}
+
+export async function getWorkspaceDataSourceUsage(id: string): Promise<BackendDataSourceUsage[]> {
+  const response = await dataSources.getUsage({ id });
+  return response.usages.map((usage) => ({ ontologyId: usage.ontologyId, ontologyName: usage.ontologyName, mappingId: usage.mappingId, mappingName: usage.mappingName }));
+}
+
+export async function deleteWorkspaceDataSource(id: string) {
+  await dataSources.delete({ id });
 }
 
 export async function previewWorkspaceSource(id: string) {

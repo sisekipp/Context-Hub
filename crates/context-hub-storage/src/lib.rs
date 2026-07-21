@@ -229,6 +229,7 @@ pub trait OntologyRepository: Send + Sync {
 pub trait SourceObjectStore: Send + Sync {
     async fn put(&self, key: &str, content: Vec<u8>) -> Result<(), StorageError>;
     async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError>;
+    async fn delete(&self, key: &str) -> Result<(), StorageError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -313,6 +314,7 @@ pub trait ControlPlaneRepository: Send + Sync {
     async fn save_draft(&self, value: &StoredOntologyDraft) -> Result<(), StorageError>;
     async fn save_version(&self, value: &StoredOntologyVersion) -> Result<(), StorageError>;
     async fn save_data_source(&self, value: &StoredDataSource) -> Result<(), StorageError>;
+    async fn delete_data_source(&self, value: &StoredDataSource) -> Result<(), StorageError>;
     async fn save_mapping(&self, value: &StoredOntologyMapping) -> Result<(), StorageError>;
     async fn save_job(&self, value: &StoredIngestionJob) -> Result<(), StorageError>;
 }
@@ -480,6 +482,21 @@ impl ControlPlaneRepository for ClickHouseControlPlaneRepository {
         self.insert_json("INSERT INTO data_sources (id, workspace_id, name, kind, configuration_json, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "name": value.name, "kind": kind, "configuration_json": value.configuration_json, "revision": value.revision, "deleted": false })).await
     }
 
+    async fn delete_data_source(&self, value: &StoredDataSource) -> Result<(), StorageError> {
+        let kind = match value.kind {
+            1 => "upload",
+            2 => "rest",
+            3 => "graphql",
+            _ => {
+                return Err(StorageError::InvalidRecord(format!(
+                    "unsupported data source kind {}",
+                    value.kind
+                )));
+            }
+        };
+        self.insert_json("INSERT INTO data_sources (id, workspace_id, name, kind, configuration_json, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "name": value.name, "kind": kind, "configuration_json": value.configuration_json, "revision": value.revision, "deleted": true })).await
+    }
+
     async fn save_mapping(&self, value: &StoredOntologyMapping) -> Result<(), StorageError> {
         self.insert_json("INSERT INTO ontology_data_mappings (id, workspace_id, ontology_id, data_source_id, name, mapping_plan_json, revision, deleted) FORMAT JSONEachRow", serde_json::json!({ "id": value.id, "workspace_id": value.workspace_id, "ontology_id": value.ontology_id, "data_source_id": value.data_source_id, "name": value.name, "mapping_plan_json": value.mapping_plan_json, "revision": value.revision, "deleted": false })).await
     }
@@ -555,6 +572,11 @@ impl SourceObjectStore for ObjectStoreSourceRepository {
             .await?
             .to_vec())
     }
+
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.store.delete(&Path::from(key)).await?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -576,6 +598,11 @@ impl SourceObjectStore for MemorySourceObjectStore {
             .get(key)
             .cloned()
             .ok_or(StorageError::NotFound)
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.objects.write().await.remove(key);
+        Ok(())
     }
 }
 
@@ -1205,6 +1232,21 @@ fn json_scalar_string(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn memory_source_objects_can_be_deleted_idempotently() {
+        let repository = MemorySourceObjectStore::default();
+        repository
+            .put("sources/example.json", vec![1, 2, 3])
+            .await
+            .unwrap();
+        repository.delete("sources/example.json").await.unwrap();
+        assert!(matches!(
+            repository.get("sources/example.json").await,
+            Err(StorageError::NotFound)
+        ));
+        repository.delete("sources/example.json").await.unwrap();
+    }
+
     #[test]
     fn graph_query_is_scoped_and_parameterized() {
         let query = GraphQuery {
@@ -1513,5 +1555,10 @@ mod tests {
             .await
             .expect("source can be read from MinIO");
         assert_eq!(content, br#"[{"id":"test"}]"#);
+        repository
+            .delete(&key)
+            .await
+            .expect("source can be removed from MinIO");
+        assert!(repository.get(&key).await.is_err());
     }
 }
