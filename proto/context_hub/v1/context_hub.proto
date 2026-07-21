@@ -113,6 +113,7 @@ enum SourceFileFormat {
   SOURCE_FILE_FORMAT_JSON = 1;
   SOURCE_FILE_FORMAT_NDJSON = 2;
   SOURCE_FILE_FORMAT_CSV = 3;
+  SOURCE_FILE_FORMAT_PARQUET = 4;
 }
 message UploadDataSourceRequest {
   string workspace_id = 1;

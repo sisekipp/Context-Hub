@@ -5,7 +5,7 @@ import { ArrowDown, ArrowRight, ArrowUp, Braces, CheckCircle2, FileJson2, GitBra
 import type { GraphValue, ImportedGraph } from "@/lib/graph-data";
 import type { OntologyCatalog, OntologyObjectType } from "@/lib/ontology-catalog";
 import { IngestionState } from "@/gen/context_hub/v1/context_hub_pb";
-import { publishOntologyCatalog, saveOntologyMapping, startIngestion, uploadWorkspaceSource } from "@/lib/context-hub-client";
+import { previewWorkspaceSource, publishOntologyCatalog, saveOntologyMapping, startIngestion, uploadWorkspaceSource } from "@/lib/context-hub-client";
 import { RestSourceForm } from "@/components/rest-source-form";
 import { GraphqlSourceForm } from "@/components/graphql-source-form";
 import { applyTransforms, createTransform, migrateLegacyTransform, transformLabel, transformOptions, type MappingTransform, type TransformKind } from "@/lib/mapping-transforms";
@@ -252,7 +252,7 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
   const [busy, setBusy] = useState(false);
   const [showRestSource, setShowRestSource] = useState(false);
   const [showGraphqlSource, setShowGraphqlSource] = useState(false);
-  const [message, setMessage] = useState(prepared.error || (dataSource ? `${dataSource.records.length.toLocaleString("de-DE")} records ready from the shared workspace source.` : "Choose a JSON, NDJSON or CSV file."));
+  const [message, setMessage] = useState(prepared.error || (dataSource ? `${dataSource.records.length.toLocaleString("de-DE")} records ready from the shared workspace source.` : "Choose a JSON, NDJSON, CSV or Parquet file."));
   const sourceFields = useMemo(() => Array.from(new Set(records.flatMap((record) => Object.keys(record)))), [records]);
   const activeMapping = objectMappings.find((mapping) => mapping.id === activeMappingId) ?? objectMappings[0];
   const activeType = ontology.objectTypes.find((type) => type.apiName === activeMapping?.objectType);
@@ -261,11 +261,13 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const parsed = parseSource(file.name, await file.text());
-      if (!parsed.length) throw new Error("No object records found");
+      const isParquet = /\.parquet$/i.test(file.name);
+      let parsed = isParquet ? [] : parseSource(file.name, await file.text());
       const uploaded = await uploadWorkspaceSource(file);
+      if (isParquet) parsed = parseSource(file.name, new TextDecoder().decode((await previewWorkspaceSource(uploaded.id)).content));
+      if (!parsed.length) throw new Error("No object records found");
       onDataSourceLoaded({ id: uploaded.id, fileName: file.name, kind: "upload", records: parsed });
-      setMessage(`${parsed.length.toLocaleString("de-DE")} records loaded and stored in MinIO.`);
+      setMessage(`${parsed.length.toLocaleString("de-DE")} preview records loaded; the original ${isParquet ? "Parquet file" : "file"} is stored in MinIO.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "The file could not be parsed.");
     }
@@ -380,10 +382,10 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
   }
 
   return <div className="workspace-view mapping-view">
-    <header className="stage-header"><div><span className="eyebrow">Ontology mapping</span><h1>Data import</h1><p>Bind file, REST, or GraphQL records to the current ontology draft.</p></div><div className="header-actions"><span className="save-state">Revision {revision}</span><button className="button secondary" onClick={() => setShowGraphqlSource(true)}><Braces size={15}/> GraphQL</button><button className="button secondary" onClick={() => setShowRestSource(true)}><Globe2 size={15}/> REST</button><label className="button secondary file-button"><Upload size={15}/> File<input type="file" accept=".json,.jsonl,.ndjson,.csv,application/json,text/csv" onChange={loadFile}/></label><button className="button secondary" disabled={!records.length || busy} onClick={() => setPreviewGraph(createGraph())}><Play size={15}/> Preview</button><button className="button secondary" disabled={!records.length || busy} onClick={saveMapping}><Save size={15}/> Save</button><button className="button primary" disabled={!records.length || !objectMappings.length || busy} onClick={importRecords}><CheckCircle2 size={15}/> {busy ? "Working…" : "Import"}</button></div></header>
+    <header className="stage-header"><div><span className="eyebrow">Ontology mapping</span><h1>Data import</h1><p>Bind file, REST, or GraphQL records to the current ontology draft.</p></div><div className="header-actions"><span className="save-state">Revision {revision}</span><button className="button secondary" onClick={() => setShowGraphqlSource(true)}><Braces size={15}/> GraphQL</button><button className="button secondary" onClick={() => setShowRestSource(true)}><Globe2 size={15}/> REST</button><label className="button secondary file-button"><Upload size={15}/> File<input type="file" accept=".json,.jsonl,.ndjson,.csv,.parquet,application/json,text/csv,application/vnd.apache.parquet" onChange={loadFile}/></label><button className="button secondary" disabled={!records.length || busy} onClick={() => setPreviewGraph(createGraph())}><Play size={15}/> Preview</button><button className="button secondary" disabled={!records.length || busy} onClick={saveMapping}><Save size={15}/> Save</button><button className="button primary" disabled={!records.length || !objectMappings.length || busy} onClick={importRecords}><CheckCircle2 size={15}/> {busy ? "Working…" : "Import"}</button></div></header>
     <div className="import-status" role="status">{message}</div>
     <div className="mapping-grid">
-      <section className="source-card"><div className="card-title">{dataSource?.kind === "graphql" ? <Braces size={18}/> : dataSource?.kind === "rest" ? <Globe2 size={18}/> : <FileJson2 size={18}/>}<div><strong>{fileName || "No source selected"}</strong><span>{records.length ? `${records.length.toLocaleString("de-DE")} preview records` : "JSON · NDJSON · CSV · REST · GraphQL"}</span></div></div><span className="eyebrow">Detected fields</span>{sourceFields.map((field) => <div className="schema-field" key={field}><code>{field}</code><span>{detectType(records, field)}</span></div>)}</section>
+      <section className="source-card"><div className="card-title">{dataSource?.kind === "graphql" ? <Braces size={18}/> : dataSource?.kind === "rest" ? <Globe2 size={18}/> : <FileJson2 size={18}/>}<div><strong>{fileName || "No source selected"}</strong><span>{records.length ? `${records.length.toLocaleString("de-DE")} preview records` : "JSON · NDJSON · CSV · Parquet · REST · GraphQL"}</span></div></div><span className="eyebrow">Detected fields</span>{sourceFields.map((field) => <div className="schema-field" key={field}><code>{field}</code><span>{detectType(records, field)}</span></div>)}</section>
       <section className="mapping-card">
         <div className="section-title"><div><span className="eyebrow">Object mappings</span><h2>Source record → ontology object</h2></div><button onClick={addObjectMapping} disabled={!records.length || !ontology.objectTypes.length}><Plus size={14}/> Object mapping</button></div>
         <div className="mapping-tabs">{objectMappings.map((mapping) => { const type = ontology.objectTypes.find((item) => item.apiName === mapping.objectType); return <button className={mapping.id === activeMapping?.id ? "active" : ""} key={mapping.id} onClick={() => setActiveMappingId(mapping.id)}>{type?.displayName ?? mapping.objectType}</button>; })}</div>

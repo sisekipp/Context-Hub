@@ -678,7 +678,9 @@ dependencies = [
  "context-hub-domain",
  "context-hub-mapping",
  "context-hub-storage",
+ "datafusion",
  "futures",
+ "parquet",
  "prost",
  "prost-build",
  "prost-types",
@@ -714,7 +716,9 @@ dependencies = [
 name = "context-hub-mapping"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "datafusion",
+ "parquet",
  "schemars",
  "serde",
  "serde_json",

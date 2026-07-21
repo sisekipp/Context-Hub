@@ -32,5 +32,9 @@ prost-build = "0.14.3"
 protoc-bin-vendored = "3.2.0"
 tonic-prost-build = "0.14.2"
 
+[dev-dependencies]
+datafusion.workspace = true
+parquet.workspace = true
+
 [lints]
 workspace = true

@@ -10,7 +10,7 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - Validation for API names, identities, reusable type references, function boundaries, link targets, enums, and interface cycles.
 - Optimistic draft revisions and immutable publish versions in the gRPC service.
 - A declarative `MappingPlan` compiled into safe Apache DataFusion SQL expressions, with an ordered visual transformation pipeline per property.
-- JSON, NDJSON, and CSV source uploads through gRPC-Web into MinIO, plus secured REST and GraphQL sources with bounded backend previews.
+- JSON, NDJSON, CSV, and Parquet source uploads through gRPC-Web into MinIO, plus secured REST and GraphQL sources with bounded backend previews.
 - A background ingestion path that reads uploaded objects as Arrow batches, executes the ontology-specific mapping through DataFusion, and writes nodes and links to ClickHouse.
 - Bounded, tenant-scoped graph query compilation into parameterized ClickHouse SQL.
 - Ontology-version-scoped graph batch ingestion with stable node/edge IDs and persistent ClickHouse storage.
@@ -19,7 +19,7 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - Durable ClickHouse control-plane repositories for ontology drafts/versions, data-source metadata, ontology-specific mappings, and ingestion jobs, including runtime reload after restart.
 - gRPC and gRPC-Web contracts for workspaces, ontologies, data sources, ingestion, and graph queries.
 - Read-only MCP tools for schema discovery and graph access.
-- A Next.js frontend with an editable React Flow ontology/link editor, revisioned ontology-bound JSON/NDJSON/CSV object and link mappings, and a connected 2D/3D graph explorer.
+- A Next.js frontend with an editable React Flow ontology/link editor, revisioned ontology-bound JSON/NDJSON/CSV/Parquet object and link mappings, and a connected 2D/3D graph explorer.
 - A workspace ontology switcher: users can create multiple isolated ontologies, while data-source definitions remain reusable at workspace level and mappings remain ontology-specific.
 - A Devcontainer with ClickHouse and MinIO. Local development uses `AUTH_MODE=dev`; no authentication service is started.
 
@@ -64,7 +64,7 @@ infra/                      ClickHouse bootstrap schema
 
 Actions, scenarios, GeoPoint/GeoShape, Attachment/MediaReference, status/render metadata, write-capable MCP tools, direct database connectors, and arbitrary user SQL are deliberately excluded. Functions are included as read-only expression, external gRPC, or WASM definitions. ConnectorX is reserved for a later direct-database connector milestone.
 
-The browser uploads selected JSON, NDJSON, and CSV files to the backend and stores them durably in MinIO. It still also parses those files locally to provide an immediate mapping preview and in-session 2D/3D result. REST and GraphQL sources are fetched and normalized by the backend so browser CORS rules do not affect the mapping workflow. `IngestionService.Start` loads the shared source through its connector, maps it with Arrow/DataFusion, and persists the ontology-version-scoped graph in ClickHouse.
+The browser uploads selected JSON, NDJSON, CSV, and Parquet files to the backend and stores them durably in MinIO. Text formats are parsed locally for an immediate mapping preview. Parquet is decoded by the backend into a bounded JSON preview while its original columnar bytes remain Arrow-native for DataFusion ingestion. REST and GraphQL sources are fetched and normalized by the backend so browser CORS rules do not affect the mapping workflow. `IngestionService.Start` loads the shared source through its connector, maps it with Arrow/DataFusion, and persists the ontology-version-scoped graph in ClickHouse. See [Parquet imports](docs/parquet-imports.md).
 
 The browser import action now executes the complete backend sequence: publish the selected ontology, save its source-specific mapping, start DataFusion ingestion, poll the durable job, and open the local graph preview after success. Ontologies, versions, source metadata, mappings, job results, and graph data survive restarts. Workspace upload sources are listed from ClickHouse after a browser refresh; selecting one checksum-validates and restores its original MinIO object into the mapping assistant. The explorer reloads the active-version graph through `GraphService` in 2,000-object keyset pages. Users can incrementally merge additional pages into the current 2D/3D view without reloading already completed query branches.
 

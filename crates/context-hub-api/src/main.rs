@@ -26,6 +26,7 @@ use context_hub_domain::{
 };
 use context_hub_mapping::{
     MappingDocument, MappingPlan, SourceFormat, execute_source_mapping_bundle,
+    preview_source_records,
 };
 use context_hub_storage::{
     ClickHouseControlPlaneRepository, ClickHouseGraphRepository, ControlPlaneRepository,
@@ -972,6 +973,11 @@ impl DataSourceService for Runtime {
             ));
         }
         let format = source_format(request.format)?;
+        if format == SourceFormat::Parquet {
+            preview_source_records(format, &request.content, 1).map_err(|error| {
+                Status::invalid_argument(format!("Parquet upload is invalid: {error}"))
+            })?;
+        }
         let id = Uuid::new_v4().to_string();
         let object_key = format!(
             "workspaces/{}/sources/{}/{}",
@@ -1068,42 +1074,51 @@ impl DataSourceService for Runtime {
         if source.workspace_id != dev_workspace_id() {
             return Err(Status::permission_denied("workspace is not accessible"));
         }
-        if !matches!(source.kind, 2 | 3) {
+        if !matches!(source.kind, 1..=3) {
             return Err(Status::failed_precondition(
-                "preview supports REST and GraphQL data sources",
+                "preview does not support this data source kind",
             ));
         }
-        let content = if source.kind == 2 {
-            let mut configuration: RestSourceConfiguration =
-                serde_json::from_str(&source.configuration_json).map_err(|error| {
-                    Status::failed_precondition(format!(
-                        "REST source configuration is invalid: {error}"
-                    ))
-                })?;
-            configuration.max_bytes = configuration.max_bytes.min(MAX_REST_PREVIEW_BYTES);
-            configuration.max_pages = configuration.max_pages.min(20);
-            fetch_rest_source(&configuration)
+        let mut records = if source.kind == 1 {
+            let (configuration, content) = self
+                .read_uploaded_source(&source)
                 .await
-                .map_err(Status::failed_precondition)?
+                .map_err(Status::failed_precondition)?;
+            preview_source_records(configuration.format, &content, MAX_REST_PREVIEW_RECORDS)
+                .map_err(|error| Status::failed_precondition(error.to_string()))?
         } else {
-            let mut configuration: GraphqlSourceConfiguration =
-                serde_json::from_str(&source.configuration_json).map_err(|error| {
-                    Status::failed_precondition(format!(
-                        "GraphQL source configuration is invalid: {error}"
-                    ))
-                })?;
-            configuration.max_bytes = configuration.max_bytes.min(MAX_REST_PREVIEW_BYTES);
-            configuration.max_pages = configuration.max_pages.min(20);
-            fetch_graphql_source(&configuration)
-                .await
-                .map_err(Status::failed_precondition)?
+            let content = if source.kind == 2 {
+                let mut configuration: RestSourceConfiguration =
+                    serde_json::from_str(&source.configuration_json).map_err(|error| {
+                        Status::failed_precondition(format!(
+                            "REST source configuration is invalid: {error}"
+                        ))
+                    })?;
+                configuration.max_bytes = configuration.max_bytes.min(MAX_REST_PREVIEW_BYTES);
+                configuration.max_pages = configuration.max_pages.min(20);
+                fetch_rest_source(&configuration)
+                    .await
+                    .map_err(Status::failed_precondition)?
+            } else {
+                let mut configuration: GraphqlSourceConfiguration =
+                    serde_json::from_str(&source.configuration_json).map_err(|error| {
+                        Status::failed_precondition(format!(
+                            "GraphQL source configuration is invalid: {error}"
+                        ))
+                    })?;
+                configuration.max_bytes = configuration.max_bytes.min(MAX_REST_PREVIEW_BYTES);
+                configuration.max_pages = configuration.max_pages.min(20);
+                fetch_graphql_source(&configuration)
+                    .await
+                    .map_err(Status::failed_precondition)?
+            };
+            serde_json::from_slice(&content)
+                .map_err(|error| Status::internal(format!("remote preview is invalid: {error}")))?
         };
-        let mut records: Vec<serde_json::Value> = serde_json::from_slice(&content)
-            .map_err(|error| Status::internal(format!("REST preview is invalid: {error}")))?;
         records.truncate(MAX_REST_PREVIEW_RECORDS);
         let record_count = records.len() as u64;
         let content = serde_json::to_vec(&records)
-            .map_err(|error| Status::internal(format!("REST preview failed: {error}")))?;
+            .map_err(|error| Status::internal(format!("source preview failed: {error}")))?;
         Ok(Response::new(PreviewDataSourceResponse {
             data_source: Some(source),
             content,
@@ -1930,8 +1945,9 @@ fn source_format(value: i32) -> Result<SourceFormat, Status> {
         1 => Ok(SourceFormat::Json),
         2 => Ok(SourceFormat::Ndjson),
         3 => Ok(SourceFormat::Csv),
+        4 => Ok(SourceFormat::Parquet),
         _ => Err(Status::invalid_argument(
-            "source file format must be JSON, NDJSON, or CSV",
+            "source file format must be JSON, NDJSON, CSV, or Parquet",
         )),
     }
 }
@@ -1941,6 +1957,7 @@ const fn proto_source_format(value: SourceFormat) -> i32 {
         SourceFormat::Json => 1,
         SourceFormat::Ndjson => 2,
         SourceFormat::Csv => 3,
+        SourceFormat::Parquet => 4,
     }
 }
 
@@ -2273,6 +2290,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::{
+        array::{ArrayRef, StringArray},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use parquet::arrow::ArrowWriter;
 
     #[tokio::test]
     async fn derives_typed_property_indexes_from_the_ontology() {
@@ -2529,6 +2552,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uploaded_parquet_previews_and_runs_through_datafusion() {
+        let runtime = Runtime::seeded().await;
+        let content = parquet_service_content();
+        let (source, mapping, version) =
+            prepare_uploaded_scope(&runtime, "services.parquet", 4, content).await;
+        let preview = runtime
+            .preview(Request::new(PreviewDataSourceRequest {
+                id: source.id.clone(),
+            }))
+            .await
+            .expect("an uploaded Parquet source has a bounded preview")
+            .into_inner();
+        assert_eq!(preview.record_count, 2);
+        let preview_rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&preview.content).expect("the preview is normalized JSON");
+        assert_eq!(preview_rows[0]["service_id"], "billing");
+
+        let queued = runtime
+            .start(Request::new(StartIngestionRequest {
+                data_source_id: source.id,
+                ontology_mapping_id: mapping.id,
+                ontology_version_id: version.id.clone(),
+            }))
+            .await
+            .expect("Parquet ingestion can be queued")
+            .into_inner();
+        let completed = wait_for_job(&runtime, queued).await;
+        assert_eq!(completed.state, IngestionState::Succeeded as i32);
+        assert_eq!(completed.nodes_written, 2);
+        let graph = query_service_page(&runtime, &version.id, 10, String::new()).await;
+        assert_eq!(graph.nodes.len(), 2);
+    }
+
+    #[tokio::test]
     async fn resumes_interrupted_ingestion_jobs() {
         let runtime = Runtime::seeded().await;
         let (source, mapping, version) = prepare_uploaded_json_scope(&runtime).await;
@@ -2718,6 +2775,21 @@ mod tests {
     async fn prepare_uploaded_json_scope(
         runtime: &Runtime,
     ) -> (DataSource, OntologyDataMapping, OntologyVersion) {
+        prepare_uploaded_scope(
+            runtime,
+            "services.json",
+            1,
+            br#"[{"service_id":"billing"}]"#.to_vec(),
+        )
+        .await
+    }
+
+    async fn prepare_uploaded_scope(
+        runtime: &Runtime,
+        file_name: &str,
+        format: i32,
+        content: Vec<u8>,
+    ) -> (DataSource, OntologyDataMapping, OntologyVersion) {
         let ontology_id =
             Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
         let expected_revision = current_draft_revision(runtime, &ontology_id).await;
@@ -2733,9 +2805,9 @@ mod tests {
             .upload(Request::new(UploadDataSourceRequest {
                 workspace_id: dev_workspace_id(),
                 name: "Service export".into(),
-                file_name: "services.json".into(),
-                format: 1,
-                content: br#"[{"service_id":"billing"}]"#.to_vec(),
+                file_name: file_name.into(),
+                format,
+                content: content.clone(),
             }))
             .await
             .expect("JSON source can be uploaded")
@@ -2748,8 +2820,8 @@ mod tests {
             .await
             .expect("uploaded source can be restored")
             .into_inner();
-        assert_eq!(restored.file_name, "services.json");
-        assert_eq!(restored.content, br#"[{"service_id":"billing"}]"#);
+        assert_eq!(restored.file_name, file_name);
+        assert_eq!(restored.content, content);
         assert_eq!(restored.sha256.len(), 64);
         let plan = MappingPlan {
             id: Uuid::new_v4(),
@@ -2780,6 +2852,25 @@ mod tests {
             .expect("mapping can be saved")
             .into_inner();
         (source, mapping, version)
+    }
+
+    fn parquet_service_content() -> Vec<u8> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "service_id",
+            DataType::Utf8,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec!["billing", "search"])) as ArrayRef],
+        )
+        .expect("test columns match the Parquet schema");
+        let mut content = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut content, schema, None)
+            .expect("the Parquet writer can be created");
+        writer.write(&batch).expect("the test batch can be written");
+        writer.close().expect("the Parquet footer can be written");
+        content
     }
 
     async fn wait_for_job(runtime: &Runtime, mut job: IngestionJob) -> IngestionJob {

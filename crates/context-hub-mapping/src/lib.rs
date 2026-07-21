@@ -13,6 +13,7 @@ use datafusion::{
     datasource::MemTable,
     prelude::SessionContext,
 };
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -49,6 +50,7 @@ pub enum SourceFormat {
     Json,
     Ndjson,
     Csv,
+    Parquet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +202,8 @@ pub enum MappingError {
     Execution(#[from] datafusion::error::DataFusionError),
     #[error("Arrow source processing failed: {0}")]
     Arrow(#[from] ArrowError),
+    #[error("Parquet source processing failed: {0}")]
+    Parquet(#[from] parquet::errors::ParquetError),
     #[error("source JSON is invalid: {0}")]
     Json(#[from] serde_json::Error),
     #[error("source must contain object records")]
@@ -631,7 +635,32 @@ fn read_source_batches(
                 .build(Cursor::new(content))?;
             reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         }
+        SourceFormat::Parquet => {
+            let reader =
+                ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::copy_from_slice(content))?
+                    .with_batch_size(8_192)
+                    .build()?;
+            reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }
     }
+}
+
+/// Converts a bounded prefix of any supported source into JSON records for schema detection and
+/// the browser mapping preview. Parquet remains Arrow-native during ingestion; this conversion is
+/// only used at the UI boundary.
+///
+/// # Errors
+///
+/// Returns [`MappingError`] if the source cannot be decoded into Arrow record batches.
+pub fn preview_source_records(
+    format: SourceFormat,
+    content: &[u8],
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, MappingError> {
+    let batches = read_source_batches(format, content)?;
+    let mut records = record_batches_to_json(&batches)?;
+    records.truncate(limit);
+    Ok(records)
 }
 
 fn normalize_json_records(content: &[u8]) -> Result<Vec<u8>, MappingError> {
@@ -841,6 +870,70 @@ const fn cast_type(value: CastType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::{
+        array::{ArrayRef, StringArray},
+        datatypes::{DataType, Field, Schema},
+    };
+    use parquet::arrow::ArrowWriter;
+
+    fn parquet_services() -> Vec<u8> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("service_id", DataType::Utf8, false),
+            Field::new("service_name", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["billing", "search"])) as ArrayRef,
+                Arc::new(StringArray::from(vec![" Billing API ", "Search API"])) as ArrayRef,
+            ],
+        )
+        .expect("test columns match the Parquet schema");
+        let mut content = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut content, schema, None)
+            .expect("the Parquet writer can be created");
+        writer.write(&batch).expect("the test batch can be written");
+        writer.close().expect("the Parquet footer can be written");
+        content
+    }
+
+    #[tokio::test]
+    async fn previews_and_maps_parquet_records() {
+        let content = parquet_services();
+        let preview = preview_source_records(SourceFormat::Parquet, &content, 1)
+            .expect("Parquet can be converted for the bounded browser preview");
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0]["service_id"], "billing");
+
+        let plan = MappingPlan {
+            id: Uuid::new_v4(),
+            object_type: "service".into(),
+            identity_fields: vec!["service_id".into()],
+            fields: vec![
+                FieldMapping {
+                    source: "service_id".into(),
+                    target: "id".into(),
+                    transforms: vec![],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+                FieldMapping {
+                    source: "service_name".into(),
+                    target: "name".into(),
+                    transforms: vec![Transform::Trim],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+            ],
+            links: vec![],
+            row_filter: None,
+        };
+        let mapped = execute_source_mapping(&plan, SourceFormat::Parquet, &content)
+            .await
+            .expect("Parquet records run through the DataFusion mapping pipeline");
+        assert_eq!(mapped.rows_read, 2);
+        assert_eq!(mapped.nodes.len(), 2);
+        assert_eq!(mapped.nodes[0].object_id, "service:billing");
+        assert!(mapped.nodes[0].properties_json.contains("Billing API"));
+    }
 
     #[test]
     fn compiles_a_safe_projection() {

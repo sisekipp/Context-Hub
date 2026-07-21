@@ -86,6 +86,7 @@ export type BackendLinkMapping = {
 function sourceFormat(fileName: string): SourceFileFormat {
   if (/\.(ndjson|jsonl)$/i.test(fileName)) return SourceFileFormat.NDJSON;
   if (/\.csv$/i.test(fileName)) return SourceFileFormat.CSV;
+  if (/\.parquet$/i.test(fileName)) return SourceFileFormat.PARQUET;
   return SourceFileFormat.JSON;
 }
 
@@ -195,9 +196,20 @@ export async function saveWorkspaceGraphqlSource(input: GraphqlSourceInput) {
 export async function previewWorkspaceSource(id: string) {
   const response = await dataSources.preview({ id });
   if (!response.dataSource) throw new Error("The backend did not return the requested data source.");
+  let fileName = response.dataSource.name;
+  if (response.dataSource.kind === DataSourceKind.UPLOAD) {
+    try {
+      const configuration = JSON.parse(response.dataSource.configurationJson) as { file_name?: string };
+      fileName = configuration.file_name || fileName;
+    } catch {
+      // Use the source name when an old upload configuration has no file name.
+    }
+  } else {
+    fileName = `${response.dataSource.kind === DataSourceKind.GRAPHQL ? "GraphQL" : "REST"} · ${response.dataSource.name}.json`;
+  }
   return {
     id: response.dataSource.id,
-    fileName: `${response.dataSource.kind === DataSourceKind.GRAPHQL ? "GraphQL" : "REST"} · ${response.dataSource.name}.json`,
+    fileName,
     content: response.content,
     recordCount: Number(response.recordCount),
   };
