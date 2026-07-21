@@ -41,7 +41,7 @@ ContextHub adds that missing semantic layer:
   version, so separate ontologies never leak semantics or graph data into one another.
 - **Every field remains explainable.** Property provenance links an object value back to its
   source, source field, mapping, import job, and import timestamp.
-- **AI receives structured context.** The read-only MCP surface is designed to expose schema
+- **AI receives structured context.** The read-only MCP surface exposes schema
   discovery, object search, object lookup, and bounded graph queries to AI agents.
 
 ## Product tour
@@ -64,10 +64,11 @@ ContextHub adds that missing semantic layer:
   <img src="demo/assets/screenshots/11-mcp-ai-context.png" alt="ContextHub ontology and graph data exposed to AI through MCP" width="100%">
 </p>
 
-The intended MCP integration gives AI agents a shared understanding of objects, relationships,
-and business context instead of a collection of disconnected records. The protocol and tool
-contracts are implemented; wiring those tools to the persisted graph repository is listed in
-[Project status](#project-status).
+The MCP integration gives AI agents a shared understanding of objects, relationships, and
+business context instead of a collection of disconnected records. Its four read-only tools use
+the same gRPC services, ontology validation, workspace isolation, and persisted ClickHouse graph
+as the UI. `get_ontology_schema` discovers active ontologies; every data query then requires an
+explicit ontology ID, so an agent cannot accidentally mix independent graphs.
 
 ## Core capabilities
 
@@ -149,7 +150,7 @@ flowchart LR
     Worker --> Arrow --> Fusion --> ClickHouse
     Domain --> ClickHouse
     Graph --> ClickHouse
-    MCP -. "repository wiring pending" .-> Graph
+    MCP -->|"gRPC"| API
 ```
 
 ### Ingestion lifecycle
@@ -272,6 +273,10 @@ Then open:
 | MinIO console | <http://localhost:9001> |
 | ClickHouse HTTP | <http://localhost:8123> |
 
+The MCP server connects to `http://127.0.0.1:50051` by default. Set
+`CONTEXT_HUB_GRPC_ENDPOINT` when the API is available at another address. The exposed tools are
+`get_ontology_schema`, `search_objects`, `get_object`, and `query_graph`.
+
 > [!TIP]
 > If `mise` is not available, verify that VS Code is attached to the Devcontainer rather than
 > running the commands in a host terminal.
@@ -321,7 +326,8 @@ weekly and through manual workflow dispatch.
 - Sensitive connector headers are encrypted outside public connector configuration.
 - Uploaded objects are size- and SHA-256-verified while streaming.
 - WASM Functions run without WASI or host imports and use memory and fuel limits.
-- MCP tool annotations and intended graph access are read-only.
+- MCP tool annotations and graph operations are read-only; graph requests are validated by the
+  same API used by first-party clients.
 - Production authentication is expected to provide a JWT validator; local development uses
   `AUTH_MODE=dev` only.
 
@@ -368,8 +374,7 @@ demo/                       Nova Commerce dataset, screenshots, and video tour
 | 2D/3D Explorer and visual Query Builder | Implemented |
 | Controlled expression, external gRPC, and WASM Functions | Implemented |
 | Durable E2E, CI, and graph benchmark | Implemented |
-| MCP protocol and read-only tool contracts | Implemented |
-| MCP connection to the persisted GraphService repository | **Next integration step** |
+| MCP protocol, read-only tools, and persisted GraphService integration | Implemented |
 | Production JWT integration and key rotation operations | **Deployment integration** |
 
 ### Deliberate V1 boundaries
