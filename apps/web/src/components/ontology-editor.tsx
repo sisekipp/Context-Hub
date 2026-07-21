@@ -67,7 +67,10 @@ function initialDocument(ontologyId: string, seedTemplate: boolean) {
     : { nodes: [] as OntologyNode[], edges: [] as OntologyEdge[] };
 }
 
-const subscribeToHydration = () => () => undefined;
+const subscribeToHydration = (onStoreChange: () => void) => {
+  queueMicrotask(onStoreChange);
+  return () => undefined;
+};
 const getClientHydrationSnapshot = () => true;
 const getServerHydrationSnapshot = () => false;
 
