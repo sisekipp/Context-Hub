@@ -147,10 +147,12 @@ button { color: inherit; }
 .transform-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
 .transform-count { color: #9fb0c9; font-size: 9px; }
 .transform-editor { grid-column: 1 / -1; margin-top: 2px; padding-top: 8px; border-top: 1px solid #202b3d; }
-.transform-editor-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.transform-editor-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .transform-editor-title > span { display: inline-flex; align-items: center; gap: 5px; color: #91a5c3; font-size: 9px; font-weight: 650; }
 .transform-editor-title > span svg { color: #c792ea; }
-.transform-editor-title > select { width: 130px; }
+.transform-editor-title > span:first-child { margin-right: auto; }
+.transform-editor-title > select { width: 118px; }
+.transform-editor-title > select:last-child { width: 130px; }
 .transform-empty { display: block; padding: 6px 0 1px; color: #65738a; font-size: 9px; }
 .transform-step { display: grid; grid-template-columns: 20px 120px minmax(0, 1fr) 78px; align-items: end; gap: 7px; margin-top: 7px; }
 .transform-order { display: grid; place-items: center; height: 28px; border-radius: 999px; color: #b9c7dd; background: #202b3d; font-size: 9px; }

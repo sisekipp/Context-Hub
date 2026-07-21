@@ -75,6 +75,7 @@ export type BackendFieldMapping = {
   sourceField: string;
   targetProperty: string;
   transforms: MappingTransform[];
+  onError: "reject_row" | "use_null" | "abort_job";
 };
 
 export type BackendObjectMapping = {
@@ -455,7 +456,7 @@ export async function executeOntologyFunction(ontologyVersionId: string, functio
   return { resultJson: response.resultJson, executor: response.executor, durationMillis: Number(response.durationMillis) };
 }
 
-function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapping[]) {
+export function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapping[]) {
   const identityFields = objectMapping.properties
     .filter((field) => field.targetProperty === objectMapping.identityProperty)
     .map((field) => field.sourceField);
@@ -467,7 +468,7 @@ function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapp
       source: field.sourceField,
       target: field.targetProperty,
       transforms: field.transforms.map(serializeTransform),
-      on_error: "reject_row",
+      on_error: field.onError,
     })),
     links: links.filter((link) => link.sourceObjectType === objectMapping.objectType).map((link) => ({
       link_type: link.linkType,

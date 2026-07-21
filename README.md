@@ -9,7 +9,7 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - A versioned ontology domain with object and link types, interfaces, value types, structs, shared and derived properties, and read-only functions.
 - Validation for API names, identities, reusable type references, function boundaries, link targets, enums, and interface cycles.
 - Optimistic backend draft revisions and immutable publish versions in the gRPC service. Work-in-progress drafts may be temporarily invalid; validation remains mandatory at publish time.
-- A declarative `MappingPlan` compiled into safe Apache DataFusion SQL expressions, with an ordered visual transformation pipeline per property.
+- A declarative `MappingPlan` compiled into safe Apache DataFusion SQL expressions, with an ordered visual transformation pipeline and per-field Skip row, Use null, or Abort import strategy.
 - JSON, NDJSON, CSV, and Parquet source uploads through gRPC-Web into MinIO, plus secured REST and GraphQL sources with bounded backend previews.
 - A background ingestion path that reads uploaded objects as Arrow batches, executes the ontology-specific mapping through DataFusion, and writes nodes and links to ClickHouse.
 - Bounded, tenant-scoped graph query compilation into parameterized ClickHouse SQL.

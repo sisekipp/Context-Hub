@@ -12,9 +12,12 @@ import { applyTransforms, createTransform, migrateLegacyTransform, transformLabe
 
 export type SourceRecord = Record<string, GraphValue>;
 export type BrowserDataSource = { id: string; fileName: string; kind: "upload" | "rest" | "graphql"; records: SourceRecord[] };
-export type PropertyMapping = { id: string; sourceField: string; targetProperty: string; transforms: MappingTransform[] };
+export type FieldErrorStrategy = "reject_row" | "use_null" | "abort_job";
+export type PropertyMapping = { id: string; sourceField: string; targetProperty: string; transforms: MappingTransform[]; onError: FieldErrorStrategy };
 export type ObjectMapping = { id: string; objectType: string; displayProperty: string; properties: PropertyMapping[] };
 export type LinkMapping = { id: string; sourceObjectMappingId: string; sourceField: string; linkType: string; missingTarget: "create" | "skip" | "error" };
+
+class PreviewAbortError extends Error {}
 
 const colors = ["#7c9cff", "#5ed3b5", "#f7b267", "#c792ea", "#ff7d9d"];
 const newId = () => crypto.randomUUID();
@@ -78,7 +81,7 @@ function matchingLinkField(fields: string[], link: OntologyCatalog["linkTypes"][
 function makeObjectMapping(type: OntologyObjectType, fields: string[], records: SourceRecord[]): ObjectMapping {
   const properties = type.properties.filter((property) => !property.derived).map((property) => {
     const sourceField = matchingField(fields, property.apiName, type.apiName);
-    return { id: newId(), sourceField, targetProperty: property.apiName, transforms: sourceField && typeof records[0]?.[sourceField] === "string" ? [{ kind: "trim" as const }] : [] };
+    return { id: newId(), sourceField, targetProperty: property.apiName, transforms: sourceField && typeof records[0]?.[sourceField] === "string" ? [{ kind: "trim" as const }] : [], onError: "reject_row" as const };
   }).filter((mapping) => mapping.sourceField);
   return { id: newId(), objectType: type.apiName, displayProperty: type.properties.find((property) => property.apiName === "name")?.apiName ?? type.properties[0]?.apiName ?? "", properties };
 }
@@ -104,7 +107,7 @@ function prepareSourceMapping(ontologyId: string, ontology: OntologyCatalog, fil
           ...mapping,
           properties: mapping.properties.map((property) => {
             const legacy = property as PropertyMapping & { transform?: unknown };
-            return { ...property, transforms: migrateLegacyTransform(property.transforms ?? legacy.transform) };
+            return { ...property, transforms: migrateLegacyTransform(property.transforms ?? legacy.transform), onError: property.onError ?? "reject_row" };
           }),
         }));
         linkMappings = candidate.linkMappings ?? [];
@@ -140,8 +143,18 @@ export function buildImportedGraph(options: {
     for (const record of records) {
       let properties: Record<string, GraphValue>;
       try {
-        properties = Object.fromEntries(mapping.properties.map((property) => [property.targetProperty, applyTransforms(record[property.sourceField] ?? null, property.transforms, record)])) as Record<string, GraphValue>;
-      } catch {
+        properties = {};
+        for (const property of mapping.properties) {
+          try {
+            properties[property.targetProperty] = applyTransforms(record[property.sourceField] ?? null, property.transforms, record);
+          } catch (error) {
+            if (property.onError === "use_null") properties[property.targetProperty] = null;
+            else if (property.onError === "abort_job") throw new PreviewAbortError(`Field '${property.targetProperty}' failed during preview`, { cause: error });
+            else throw error;
+          }
+        }
+      } catch (error) {
+        if (error instanceof PreviewAbortError) throw error;
         skippedCount += 1;
         continue;
       }
@@ -209,7 +222,7 @@ function TransformParameters({ transform, onChange }: { transform: MappingTransf
   return <span className="transform-no-parameters">No parameters</span>;
 }
 
-function TransformEditor({ transforms, onChange }: { transforms: MappingTransform[]; onChange: (value: MappingTransform[]) => void }) {
+function TransformEditor({ transforms, onChange, onError, onErrorChange }: { transforms: MappingTransform[]; onChange: (value: MappingTransform[]) => void; onError: FieldErrorStrategy; onErrorChange: (value: FieldErrorStrategy) => void }) {
   function replace(index: number, transform: MappingTransform) {
     onChange(transforms.map((item, itemIndex) => itemIndex === index ? transform : item));
   }
@@ -221,7 +234,7 @@ function TransformEditor({ transforms, onChange }: { transforms: MappingTransfor
     onChange(next);
   }
   return <div className="transform-editor">
-    <div className="transform-editor-title"><span><WandSparkles size={12}/> Transformation pipeline</span><select aria-label="Add transformation" value="" onChange={(event) => { if (event.target.value) onChange([...transforms, createTransform(event.target.value as TransformKind)]); }}><option value="">+ Add transform</option>{transformOptions.map((option) => <option value={option.kind} key={option.kind}>{option.label}</option>)}</select></div>
+    <div className="transform-editor-title"><span><WandSparkles size={12}/> Transformation pipeline</span><select aria-label="Field error strategy" value={onError} onChange={(event) => onErrorChange(event.target.value as FieldErrorStrategy)}><option value="reject_row">Skip row</option><option value="use_null">Use null</option><option value="abort_job">Abort import</option></select><select aria-label="Add transformation" value="" onChange={(event) => { if (event.target.value) onChange([...transforms, createTransform(event.target.value as TransformKind)]); }}><option value="">+ Add transform</option>{transformOptions.map((option) => <option value={option.kind} key={option.kind}>{option.label}</option>)}</select></div>
     {!transforms.length && <span className="transform-empty">Source value is used unchanged.</span>}
     {transforms.map((transform, index) => <div className="transform-step" key={`${index}-${transform.kind}`}>
       <span className="transform-order">{index + 1}</span>
@@ -299,7 +312,7 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
     const target = activeType.properties.find((property) => !property.derived && !activeMapping.properties.some((mapping) => mapping.targetProperty === property.apiName));
     const source = sourceFields.find((field) => !activeMapping.properties.some((mapping) => mapping.sourceField === field));
     if (!target || !source) return;
-    updateObjectMapping({ properties: [...activeMapping.properties, { id: newId(), sourceField: source, targetProperty: target.apiName, transforms: [] }] });
+    updateObjectMapping({ properties: [...activeMapping.properties, { id: newId(), sourceField: source, targetProperty: target.apiName, transforms: [], onError: "reject_row" }] });
   }
 
   function addLinkMapping() {
@@ -312,6 +325,17 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
 
   function createGraph() {
     return buildImportedGraph({ records, objectMappings, linkMappings, ontology, fileName });
+  }
+
+  function previewRecords() {
+    try {
+      const graph = createGraph();
+      setPreviewGraph(graph);
+      setMessage(`${graph.nodes.length.toLocaleString("de-DE")} objects previewed; ${graph.skippedCount.toLocaleString("de-DE")} source rows skipped.`);
+    } catch (error) {
+      setPreviewGraph(null);
+      setMessage(error instanceof Error ? error.message : "The preview failed.");
+    }
   }
 
   function backendMapping() {
@@ -373,7 +397,7 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
       const job = await startIngestion(dataSource!.id, mapping.id, version.id);
       if (job.state !== IngestionState.SUCCEEDED) throw new Error(job.error || "The ingestion job did not complete successfully.");
       const graph = createGraph(); onImport(graph);
-      setMessage(`${job.nodesWritten.toLocaleString("de-DE")} objects and ${job.edgesWritten.toLocaleString("de-DE")} links persisted in ClickHouse.`);
+      setMessage(`${job.nodesWritten.toLocaleString("de-DE")} objects and ${job.edgesWritten.toLocaleString("de-DE")} links persisted in ClickHouse · ${job.rowsRejected.toLocaleString("de-DE")} rows rejected from ${job.rowsRead.toLocaleString("de-DE")} read.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "The import could not be completed.");
     } finally {
@@ -382,7 +406,7 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
   }
 
   return <div className="workspace-view mapping-view">
-    <header className="stage-header"><div><span className="eyebrow">Ontology mapping</span><h1>Data import</h1><p>Bind file, REST, or GraphQL records to the current ontology draft.</p></div><div className="header-actions"><span className="save-state">Revision {revision}</span><button className="button secondary" onClick={() => setShowGraphqlSource(true)}><Braces size={15}/> GraphQL</button><button className="button secondary" onClick={() => setShowRestSource(true)}><Globe2 size={15}/> REST</button><label className="button secondary file-button"><Upload size={15}/> File<input type="file" accept=".json,.jsonl,.ndjson,.csv,.parquet,application/json,text/csv,application/vnd.apache.parquet" onChange={loadFile}/></label><button className="button secondary" disabled={!records.length || busy} onClick={() => setPreviewGraph(createGraph())}><Play size={15}/> Preview</button><button className="button secondary" disabled={!records.length || busy} onClick={saveMapping}><Save size={15}/> Save</button><button className="button primary" disabled={!records.length || !objectMappings.length || busy} onClick={importRecords}><CheckCircle2 size={15}/> {busy ? "Working…" : "Import"}</button></div></header>
+    <header className="stage-header"><div><span className="eyebrow">Ontology mapping</span><h1>Data import</h1><p>Bind file, REST, or GraphQL records to the current ontology draft.</p></div><div className="header-actions"><span className="save-state">Revision {revision}</span><button className="button secondary" onClick={() => setShowGraphqlSource(true)}><Braces size={15}/> GraphQL</button><button className="button secondary" onClick={() => setShowRestSource(true)}><Globe2 size={15}/> REST</button><label className="button secondary file-button"><Upload size={15}/> File<input type="file" accept=".json,.jsonl,.ndjson,.csv,.parquet,application/json,text/csv,application/vnd.apache.parquet" onChange={loadFile}/></label><button className="button secondary" disabled={!records.length || busy} onClick={previewRecords}><Play size={15}/> Preview</button><button className="button secondary" disabled={!records.length || busy} onClick={saveMapping}><Save size={15}/> Save</button><button className="button primary" disabled={!records.length || !objectMappings.length || busy} onClick={importRecords}><CheckCircle2 size={15}/> {busy ? "Working…" : "Import"}</button></div></header>
     <div className="import-status" role="status">{message}</div>
     <div className="mapping-grid">
       <section className="source-card"><div className="card-title">{dataSource?.kind === "graphql" ? <Braces size={18}/> : dataSource?.kind === "rest" ? <Globe2 size={18}/> : <FileJson2 size={18}/>}<div><strong>{fileName || "No source selected"}</strong><span>{records.length ? `${records.length.toLocaleString("de-DE")} preview records` : "JSON · NDJSON · CSV · Parquet · REST · GraphQL"}</span></div></div><span className="eyebrow">Detected fields</span>{sourceFields.map((field) => <div className="schema-field" key={field}><code>{field}</code><span>{detectType(records, field)}</span></div>)}</section>
@@ -391,7 +415,7 @@ export function MappingPanel({ ontologyId, ontologyName, ontologySlug, ontology,
         <div className="mapping-tabs">{objectMappings.map((mapping) => { const type = ontology.objectTypes.find((item) => item.apiName === mapping.objectType); return <button className={mapping.id === activeMapping?.id ? "active" : ""} key={mapping.id} onClick={() => setActiveMappingId(mapping.id)}>{type?.displayName ?? mapping.objectType}</button>; })}</div>
         {activeMapping && activeType ? <><div className="mapping-settings"><label>Ontology Object Type<select value={activeMapping.objectType} onChange={(event) => changeObjectType(event.target.value)}>{ontology.objectTypes.map((type) => <option value={type.apiName} key={type.apiName}>{type.displayName} ({type.apiName})</option>)}</select></label><label>Display property<select value={activeMapping.displayProperty} onChange={(event) => updateObjectMapping({ displayProperty: event.target.value })}>{activeType.properties.map((property) => <option value={property.apiName} key={property.apiName}>{property.displayName}</option>)}</select></label><label>Identity property<input value={activeType.properties.find((property) => property.identity)?.apiName ?? "Missing in ontology"} readOnly/></label></div>
           <div className="mapping-column-head"><span>Source field</span><span/><span>Ontology property</span><span>Pipeline</span><span/></div>
-          {activeMapping.properties.map((mapping) => <div className="mapping-row ontology-bound" key={mapping.id}><select value={mapping.sourceField} onChange={(event) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, sourceField: event.target.value } : item) })}>{sourceFields.map((field) => <option key={field}>{field}</option>)}</select><ArrowRight size={15}/><select value={mapping.targetProperty} onChange={(event) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, targetProperty: event.target.value } : item) })}>{activeType.properties.filter((property) => !property.derived).map((property) => <option value={property.apiName} key={property.apiName}>{activeType.apiName}.{property.apiName}</option>)}</select><span className="transform-count">{mapping.transforms.length ? `${mapping.transforms.length} step${mapping.transforms.length === 1 ? "" : "s"}` : "Unchanged"}</span><button title="Delete property mapping" onClick={() => updateObjectMapping({ properties: activeMapping.properties.filter((item) => item.id !== mapping.id) })}><Trash2 size={13}/></button><TransformEditor transforms={mapping.transforms} onChange={(transforms) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, transforms } : item) })}/></div>)}
+          {activeMapping.properties.map((mapping) => <div className="mapping-row ontology-bound" key={mapping.id}><select value={mapping.sourceField} onChange={(event) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, sourceField: event.target.value } : item) })}>{sourceFields.map((field) => <option key={field}>{field}</option>)}</select><ArrowRight size={15}/><select value={mapping.targetProperty} onChange={(event) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, targetProperty: event.target.value } : item) })}>{activeType.properties.filter((property) => !property.derived).map((property) => <option value={property.apiName} key={property.apiName}>{activeType.apiName}.{property.apiName}</option>)}</select><span className="transform-count">{mapping.transforms.length ? `${mapping.transforms.length} step${mapping.transforms.length === 1 ? "" : "s"}` : "Unchanged"}</span><button title="Delete property mapping" onClick={() => updateObjectMapping({ properties: activeMapping.properties.filter((item) => item.id !== mapping.id) })}><Trash2 size={13}/></button><TransformEditor transforms={mapping.transforms} onChange={(transforms) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, transforms } : item) })} onError={mapping.onError} onErrorChange={(onError) => updateObjectMapping({ properties: activeMapping.properties.map((item) => item.id === mapping.id ? { ...item, onError } : item) })}/></div>)}
           <div className="mapping-actions"><button onClick={addPropertyMapping}><Plus size={13}/> Property mapping</button>{objectMappings.length > 1 && <button className="danger-text" onClick={() => { setObjectMappings((items) => items.filter((item) => item.id !== activeMapping.id)); setLinkMappings((items) => items.filter((item) => item.sourceObjectMappingId !== activeMapping.id)); setActiveMappingId(objectMappings.find((item) => item.id !== activeMapping.id)?.id ?? ""); }}><Trash2 size={13}/> Delete object mapping</button>}</div></> : <div className="mapping-empty">Choose a file to create the first ontology mapping.</div>}
 
         <div className="link-mapping-section"><div className="section-title"><div><span className="eyebrow">Link mappings</span><h2>Source reference → ontology link</h2></div><button onClick={addLinkMapping} disabled={!objectMappings.length}><Plus size={14}/> Link mapping</button></div>

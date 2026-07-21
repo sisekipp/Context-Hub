@@ -7,8 +7,8 @@ const serviceMapping: ObjectMapping = {
   objectType: "service",
   displayProperty: "name",
   properties: [
-    { id: "id", sourceField: "service_id", targetProperty: "id", transforms: [] },
-    { id: "name", sourceField: "name", targetProperty: "name", transforms: [{ kind: "trim" }] },
+    { id: "id", sourceField: "service_id", targetProperty: "id", transforms: [], onError: "reject_row" },
+    { id: "name", sourceField: "name", targetProperty: "name", transforms: [{ kind: "trim" }], onError: "reject_row" },
   ],
 };
 
@@ -52,8 +52,8 @@ describe("ontology-bound file mapping", () => {
     const teamMapping: ObjectMapping = {
       id: "teams", objectType: "team", displayProperty: "name",
       properties: [
-        { id: "team-id", sourceField: "owner_team", targetProperty: "id", transforms: [] },
-        { id: "team-name", sourceField: "owner_team", targetProperty: "name", transforms: [] },
+        { id: "team-id", sourceField: "owner_team", targetProperty: "id", transforms: [], onError: "reject_row" },
+        { id: "team-name", sourceField: "owner_team", targetProperty: "name", transforms: [], onError: "reject_row" },
       ],
     };
     const links: LinkMapping[] = [{ id: "owner", sourceObjectMappingId: "services", sourceField: "owner_team", linkType: "owned_by", missingTarget: "error" }];
@@ -62,5 +62,28 @@ describe("ontology-bound file mapping", () => {
     expect(graph.nodes.filter((node) => node.kind === "Team")).toHaveLength(1);
     expect(graph.links).toHaveLength(2);
     expect(graph.linkErrorCount).toBe(0);
+  });
+
+  it("applies use-null, skip-row and abort-import strategies in the preview", () => {
+    const records = parseSource("services.json", JSON.stringify([
+      { service_id: "valid", name: "42" },
+      { service_id: "invalid", name: "not-a-number" },
+    ]));
+    const withStrategy = (onError: "reject_row" | "use_null" | "abort_job"): ObjectMapping => ({
+      ...serviceMapping,
+      properties: serviceMapping.properties.map((property) => property.targetProperty === "name"
+        ? { ...property, transforms: [{ kind: "cast" as const, target: "int64" as const }], onError }
+        : property),
+    });
+
+    const nullable = buildImportedGraph({ records, objectMappings: [withStrategy("use_null")], linkMappings: [], ontology: defaultOntologyCatalog, fileName: "services.json" });
+    expect(nullable.nodes).toHaveLength(2);
+    expect(nullable.nodes.find((node) => node.id === "service:invalid")?.properties.name).toBeNull();
+
+    const rejected = buildImportedGraph({ records, objectMappings: [withStrategy("reject_row")], linkMappings: [], ontology: defaultOntologyCatalog, fileName: "services.json" });
+    expect(rejected.nodes).toHaveLength(1);
+    expect(rejected.skippedCount).toBe(1);
+
+    expect(() => buildImportedGraph({ records, objectMappings: [withStrategy("abort_job")], linkMappings: [], ontology: defaultOntologyCatalog, fileName: "services.json" })).toThrow("Field 'name' failed during preview");
   });
 });

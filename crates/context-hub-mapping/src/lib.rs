@@ -213,6 +213,8 @@ pub enum MappingError {
         link_type: String,
         target_id: String,
     },
+    #[error("field '{field}' failed to transform at source row {row}")]
+    FieldTransform { field: String, row: usize },
 }
 
 struct PendingEdge {
@@ -279,14 +281,17 @@ impl MappingPlan {
         let projection = self
             .fields
             .iter()
-            .map(|field| {
-                let mut expression = quote_identifier(&field.source);
+            .enumerate()
+            .map(|(index, field)| {
+                let source = quote_identifier(&field.source);
+                let mut expression = source.clone();
                 for transform in &field.transforms {
                     expression = compile_transform(expression, transform)?;
                 }
                 Ok(format!(
-                    "{expression} AS {}",
-                    quote_identifier(&field.target)
+                    "{expression} AS {}, ({source} IS NOT NULL AND ({expression}) IS NULL) AS {}",
+                    quote_identifier(&field.target),
+                    quote_identifier(&format!("__mapping_error_{index}")),
                 ))
             })
             .collect::<Result<Vec<_>, MappingError>>()?;
@@ -452,11 +457,35 @@ async fn map_plan_batches(
     let mut nodes = Vec::new();
     let mut rows_rejected = 0;
     let mut pending_edges = Vec::new();
-    for row in rows {
+    for (row_index, row) in rows.into_iter().enumerate() {
         let Some(object) = row.as_object() else {
             rows_rejected += 1;
             continue;
         };
+        let mut reject_row = false;
+        for (field_index, field) in plan.fields.iter().enumerate() {
+            let failed = object
+                .get(&format!("__mapping_error_{field_index}"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if !failed {
+                continue;
+            }
+            match field.on_error {
+                ErrorStrategy::UseNull => {}
+                ErrorStrategy::RejectRow => reject_row = true,
+                ErrorStrategy::AbortJob => {
+                    return Err(MappingError::FieldTransform {
+                        field: field.target.clone(),
+                        row: row_index + 1,
+                    });
+                }
+            }
+        }
+        if reject_row {
+            rows_rejected += 1;
+            continue;
+        }
         let identity = (0..plan.identity_fields.len())
             .map(|index| object.get(&format!("__identity_{index}")))
             .collect::<Option<Vec<_>>>();
@@ -469,11 +498,14 @@ async fn map_plan_batches(
         let properties = plan
             .fields
             .iter()
-            .filter_map(|field| {
-                object
-                    .get(&field.target)
-                    .cloned()
-                    .map(|value| (field.target.clone(), value))
+            .map(|field| {
+                (
+                    field.target.clone(),
+                    object
+                        .get(&field.target)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                )
             })
             .collect::<serde_json::Map<_, _>>();
         nodes.push(MappedNode {
@@ -739,7 +771,7 @@ fn expand_link_values(values: &[&serde_json::Value]) -> Vec<Vec<serde_json::Valu
 
 fn compile_transform(input: String, transform: &Transform) -> Result<String, MappingError> {
     let sql = match transform {
-        Transform::Cast { target } => format!("CAST({input} AS {})", cast_type(*target)),
+        Transform::Cast { target } => format!("TRY_CAST({input} AS {})", cast_type(*target)),
         Transform::Trim => format!("btrim({input})"),
         Transform::Lowercase => format!("lower({input})"),
         Transform::Uppercase => format!("upper({input})"),
@@ -956,8 +988,59 @@ mod tests {
         };
         assert_eq!(
             plan.compile_datafusion_sql().unwrap(),
-            "SELECT lower(btrim(\"service_name\")) AS \"name\" FROM source WHERE \"active\" = TRUE"
+            "SELECT lower(btrim(\"service_name\")) AS \"name\", (\"service_name\" IS NOT NULL AND (lower(btrim(\"service_name\"))) IS NULL) AS \"__mapping_error_0\" FROM source WHERE \"active\" = TRUE"
         );
+    }
+
+    #[tokio::test]
+    async fn applies_field_error_strategies_per_source_row() {
+        let mut plan = MappingPlan {
+            id: Uuid::nil(),
+            object_type: "service".into(),
+            identity_fields: vec!["id".into()],
+            fields: vec![
+                FieldMapping {
+                    source: "id".into(),
+                    target: "id".into(),
+                    transforms: vec![],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+                FieldMapping {
+                    source: "score".into(),
+                    target: "score".into(),
+                    transforms: vec![Transform::Cast {
+                        target: CastType::Int64,
+                    }],
+                    on_error: ErrorStrategy::RejectRow,
+                },
+            ],
+            links: vec![],
+            row_filter: None,
+        };
+        let content = br#"[{"id":"valid","score":"42"},{"id":"invalid","score":"not-a-number"}]"#;
+
+        let rejected = execute_source_mapping(&plan, SourceFormat::Json, content)
+            .await
+            .expect("reject-row keeps valid records");
+        assert_eq!(rejected.nodes.len(), 1);
+        assert_eq!(rejected.rows_rejected, 1);
+
+        plan.fields[1].on_error = ErrorStrategy::UseNull;
+        let nullable = execute_source_mapping(&plan, SourceFormat::Json, content)
+            .await
+            .expect("use-null preserves the row");
+        assert_eq!(nullable.nodes.len(), 2);
+        assert_eq!(nullable.rows_rejected, 0);
+        assert!(nullable.nodes[1].properties_json.contains("\"score\":null"));
+
+        plan.fields[1].on_error = ErrorStrategy::AbortJob;
+        let aborted = execute_source_mapping(&plan, SourceFormat::Json, content)
+            .await
+            .expect_err("abort-job stops at the invalid field");
+        assert!(matches!(
+            aborted,
+            MappingError::FieldTransform { field, row: 2 } if field == "score"
+        ));
     }
 
     #[test]

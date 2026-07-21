@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { graphqlSourceInput, ontologyDefinition, restSourceInput, type BackendDataSource } from "./context-hub-client";
+import { graphqlSourceInput, mappingPlan, ontologyDefinition, restSourceInput, type BackendDataSource } from "./context-hub-client";
 import type { OntologyCatalog } from "./ontology-catalog";
 
 function source(kind: BackendDataSource["kind"], configuration: unknown): BackendDataSource {
@@ -64,5 +64,19 @@ describe("ontology draft serialization", () => {
     expect(definition.shared_properties[0]).toMatchObject({ api_name: "lifecycle", indexed: true });
     expect(definition.link_types[0].target_cardinality).toBe("one");
     expect(definition.link_types[0]).toMatchObject({ required: true, properties: [{ api_name: "reason", description: "Why the dependency exists", indexed: true }] });
+  });
+});
+
+describe("mapping error strategies", () => {
+  it("serializes the selected strategy for every backend field", () => {
+    const plan = mappingPlan({
+      objectType: "service",
+      identityProperty: "id",
+      properties: [
+        { sourceField: "service_id", targetProperty: "id", transforms: [], onError: "abort_job" },
+        { sourceField: "score", targetProperty: "score", transforms: [{ kind: "cast", target: "int64" }], onError: "use_null" },
+      ],
+    }, []);
+    expect(plan.fields.map((field) => field.on_error)).toEqual(["abort_job", "use_null"]);
   });
 });
