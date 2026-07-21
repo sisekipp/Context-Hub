@@ -8,7 +8,7 @@ import { MappingPanel, parseSource, type BrowserDataSource } from "@/components/
 import { OntologyEditor } from "@/components/ontology-editor";
 import { emptyGraph, type ImportedGraph } from "@/lib/graph-data";
 import { defaultOntologyCatalog, type OntologyCatalog } from "@/lib/ontology-catalog";
-import { createWorkspaceOntology, downloadWorkspaceSource, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph, previewWorkspaceSource, type BackendDataSource } from "@/lib/context-hub-client";
+import { createWorkspaceOntology, downloadWorkspaceSource, expandPersistedGraphNode, listWorkspaceDataSources, listWorkspaceOntologies, loadPersistedGraph, previewWorkspaceSource, queryPersistedGraph, type BackendDataSource, type GraphQuerySpec } from "@/lib/context-hub-client";
 
 type Section = "ontology" | "sources" | "mapping" | "graph";
 type OntologyWorkspace = { id: string; name: string; slug: string; activeVersionId: string };
@@ -71,6 +71,8 @@ export default function Home() {
   const [backendDataSources, setBackendDataSources] = useState<BackendDataSource[]>([]);
   const [activeDataSourceId, setActiveDataSourceId] = useState("");
   const [loadingMoreGraph, setLoadingMoreGraph] = useState(false);
+  const [queryingGraph, setQueryingGraph] = useState(false);
+  const [expandingNodeId, setExpandingNodeId] = useState("");
   const graphRequests = useRef(new Set<string>());
   const savedRegistry = useSyncExternalStore(subscribeToRegistry, registrySnapshot, () => defaultRegistrySnapshot);
   const registry = useMemo(() => parseRegistry(savedRegistry), [savedRegistry]);
@@ -193,6 +195,29 @@ export default function Home() {
     }
   }
 
+  async function runGraphQuery(spec: GraphQuerySpec) {
+    setQueryingGraph(true);
+    try {
+      const result = await queryPersistedGraph(activeOntology, activeCatalog, spec);
+      setGraphs((items) => ({ ...items, [activeOntology.id]: result }));
+    } finally {
+      setQueryingGraph(false);
+    }
+  }
+
+  async function expandGraphNode(node: ImportedGraph["nodes"][number]) {
+    const objectType = activeCatalog.objectTypes.find((type) => type.displayName === node.kind || type.apiName === node.kind);
+    if (!objectType) throw new Error(`Object type '${node.kind}' does not exist in the active ontology.`);
+    const linkTypes = activeCatalog.linkTypes.filter((link) => link.sourceType === objectType.apiName || link.targetType === objectType.apiName).map((link) => link.apiName);
+    setExpandingNodeId(node.id);
+    try {
+      const expansion = await expandPersistedGraphNode(activeOntology, activeCatalog, objectType.apiName, node.id, linkTypes);
+      setGraphs((items) => ({ ...items, [activeOntology.id]: mergeImportedGraphs(items[activeOntology.id] ?? emptyGraph, expansion) }));
+    } finally {
+      setExpandingNodeId("");
+    }
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -217,7 +242,7 @@ export default function Home() {
           onUseForMapping={(id) => { void selectDataSource(id); setSection("mapping"); }}
         />}
         {section === "mapping" && <MappingPanel key={`${activeOntology.id}:${activeDataSource?.id ?? "new"}`} ontologyId={activeOntology.id} ontologyName={activeOntology.name} ontologySlug={activeOntology.slug} ontology={activeCatalog} dataSource={activeDataSource} onDataSourceLoaded={registerDataSource} onImport={(imported) => { setGraphs((items) => ({ ...items, [activeOntology.id]: imported })); setSection("graph"); }} />}
-        {section === "graph" && <GraphExplorer graph={activeGraph} onOpenMapping={() => setSection("mapping")} onOpenOntology={() => setSection("ontology")} onLoadMore={loadMoreGraph} canLoadMore={!!activeGraph.pagination?.hasMore} loadingMore={loadingMoreGraph} />}
+        {section === "graph" && <GraphExplorer graph={activeGraph} ontology={activeCatalog} onOpenMapping={() => setSection("mapping")} onOpenOntology={() => setSection("ontology")} onLoadMore={loadMoreGraph} onRunQuery={runGraphQuery} onExpandNode={expandGraphNode} canLoadMore={!!activeGraph.pagination?.hasMore} loadingMore={loadingMoreGraph} queryBusy={queryingGraph} expandingNodeId={expandingNodeId} />}
       </section>
     </main>
   );
@@ -236,5 +261,6 @@ function mergeImportedGraphs(current: ImportedGraph, page: ImportedGraph): Impor
     recordCount: nodes.size,
     importedAt: page.importedAt,
     pagination: page.pagination,
+    aggregations: page.aggregations?.length ? page.aggregations : current.aggregations,
   };
 }

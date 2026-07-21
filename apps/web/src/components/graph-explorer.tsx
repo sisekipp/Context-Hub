@@ -9,7 +9,10 @@ import {
   ArrowLeft, ArrowRight, Box, DatabaseZap, Download, Filter, Focus, GitBranch, Layers3,
   Maximize2, Minus, Network, Plus, RotateCcw, Search, Tags, X,
 } from "lucide-react";
+import { GraphQueryBuilder } from "@/components/graph-query-builder";
+import type { GraphQuerySpec } from "@/lib/context-hub-client";
 import type { ImportedGraph, ImportedGraphNode } from "@/lib/graph-data";
+import type { OntologyCatalog } from "@/lib/ontology-catalog";
 
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), { ssr: false });
@@ -59,14 +62,20 @@ function create3dLabel(node: VisualNode) {
 }
 
 export function GraphExplorer({
-  graph, onOpenMapping, onOpenOntology, onLoadMore, canLoadMore = false, loadingMore = false,
+  graph, ontology, onOpenMapping, onOpenOntology, onLoadMore, onRunQuery, onExpandNode,
+  canLoadMore = false, loadingMore = false, queryBusy = false, expandingNodeId = "",
 }: {
   graph: ImportedGraph;
+  ontology: OntologyCatalog;
   onOpenMapping: () => void;
   onOpenOntology: () => void;
   onLoadMore?: () => void;
   canLoadMore?: boolean;
   loadingMore?: boolean;
+  onRunQuery: (spec: GraphQuerySpec) => Promise<void>;
+  onExpandNode: (node: ImportedGraphNode) => Promise<void>;
+  queryBusy?: boolean;
+  expandingNodeId?: string;
 }) {
   const graph2dRef = useRef<ForceGraph2DMethods | undefined>(undefined);
   const graph3dRef = useRef<ForceGraph3DMethods | undefined>(undefined);
@@ -79,6 +88,7 @@ export function GraphExplorer({
   const [hiddenKinds, setHiddenKinds] = useState<string[]>([]);
   const [showLabels, setShowLabels] = useState(true);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [queryOpen, setQueryOpen] = useState(false);
   const [nodeLimit, setNodeLimit] = useState(750);
 
   const kindSummary = useMemo(() => {
@@ -201,6 +211,11 @@ export function GraphExplorer({
     setHiddenKinds((items) => items.includes(kind) ? items.filter((item) => item !== kind) : [...items, kind]);
   }
 
+  async function expandNode(node: VisualNode) {
+    await onExpandNode(node);
+    navigateTo(node.id);
+  }
+
   const renderLabel = (rawNode: NodeObject2D, context: CanvasRenderingContext2D, scale: number) => {
     const node = rawNode as NodeObject2D<VisualNode>;
     if (!showLabels || node.x === undefined || node.y === undefined || (!focusId && data.nodes.length > 900 && scale < 1.6)) return;
@@ -238,10 +253,16 @@ export function GraphExplorer({
   if (graph.nodes.length === 0) return <div className="workspace-view graph-view"><header className="stage-header"><div><span className="eyebrow">Graph explorer</span><h1>Explore</h1><p>Navigate ontology instances and their relationships.</p></div></header><div className="empty-graph"><DatabaseZap size={34}/><h2>No imported data yet</h2><p>Map a source file to ontology object and link types, then import it.</p><button className="button primary" onClick={onOpenMapping}>Open data mapping</button></div></div>;
 
   return <div className="workspace-view graph-view orbit-explorer">
-    <header className="explorer-header"><div><span className="eyebrow">Knowledge graph</span><h1>{graph.sourceName || "Explore"}</h1><p>{graph.nodes.length.toLocaleString("de-DE")} loaded objects · {graph.links.length.toLocaleString("de-DE")} relationships</p></div><div className="binding-pills">{graph.ontologyBindings.objectTypes.map((type) => <span key={type}>Object · {type}</span>)}{graph.ontologyBindings.linkTypes.map((type) => <span key={type}>Link · {type}</span>)}</div></header>
-    <div className="explorer-commandbar"><div className="explorer-tabs"><button className="active">Explore</button><button onClick={onOpenOntology}>Schema</button></div><div className="explorer-actions"><div className="explorer-search"><Search size={14}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search objects…"/>{query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={13}/></button>}{searchResults.length > 0 && <div className="search-results">{searchResults.map((node) => <button key={node.id} onClick={() => { navigateTo(node.id); setQuery(""); }}><i style={{ background: node.color }}/><span><strong>{node.name}</strong><small>{node.kind} · {node.id}</small></span></button>)}</div>}</div><button className={filterOpen ? "active" : ""} onClick={() => setFilterOpen((open) => !open)}><Filter size={14}/> Filter</button>{canLoadMore && <button onClick={onLoadMore} disabled={loadingMore}><Download size={14}/> {loadingMore ? "Loading…" : "Load more"}</button>}<label className="limit-select">Show<select value={nodeLimit} onChange={(event) => setNodeLimit(Number(event.target.value))}><option value={250}>250</option><option value={500}>500</option><option value={750}>750</option><option value={1000}>1.000</option><option value={2000}>2.000</option><option value={5000}>5.000</option></select></label><div className="view-switch"><button className={mode === "2d" ? "active" : ""} onClick={() => switchMode("2d")}><Network size={14}/> 2D</button><button className={mode === "3d" ? "active" : ""} onClick={() => switchMode("3d")}><Box size={14}/> 3D</button></div></div></div>
+    <header className="explorer-header"><div><span className="eyebrow">Knowledge graph</span><h1>{graph.sourceName || "Explore"}</h1><p>{graph.nodes.length.toLocaleString("de-DE")} loaded objects · {graph.links.length.toLocaleString("de-DE")} relationships</p></div><div className="binding-pills">{graph.aggregations?.map((aggregation) => <span className="aggregation-pill" key={aggregation.alias}>{aggregation.alias} · {String(aggregation.value)}</span>)}{graph.ontologyBindings.objectTypes.map((type) => <span key={type}>Object · {type}</span>)}</div></header>
+    <div className="explorer-commandbar"><div className="explorer-tabs"><button className="active">Explore</button><button onClick={onOpenOntology}>Schema</button></div><div className="explorer-actions"><div className="explorer-search"><Search size={14}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search objects…"/>{query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={13}/></button>}{searchResults.length > 0 && <div className="search-results">{searchResults.map((node) => <button key={node.id} onClick={() => { navigateTo(node.id); setQuery(""); }}><i style={{ background: node.color }}/><span><strong>{node.name}</strong><small>{node.kind} · {node.id}</small></span></button>)}</div>}</div><button className={queryOpen ? "active" : ""} onClick={() => setQueryOpen(true)}><Filter size={14}/> Query</button><button className={filterOpen ? "active" : ""} onClick={() => setFilterOpen((open) => !open)}><Layers3 size={14}/> Types</button>{canLoadMore && <button onClick={onLoadMore} disabled={loadingMore}><Download size={14}/> {loadingMore ? "Loading…" : "Load more"}</button>}<label className="limit-select">Show<select value={nodeLimit} onChange={(event) => setNodeLimit(Number(event.target.value))}><option value={250}>250</option><option value={500}>500</option><option value={750}>750</option><option value={1000}>1.000</option><option value={2000}>2.000</option><option value={5000}>5.000</option></select></label><div className="view-switch"><button className={mode === "2d" ? "active" : ""} onClick={() => switchMode("2d")}><Network size={14}/> 2D</button><button className={mode === "3d" ? "active" : ""} onClick={() => switchMode("3d")}><Box size={14}/> 3D</button></div></div></div>
+    {queryOpen && <GraphQueryBuilder
+      catalog={ontology}
+      busy={queryBusy}
+      onClose={() => setQueryOpen(false)}
+      onRun={onRunQuery}
+    />}
     <div className="explorer-canvas-shell">
-      <div className="graph-canvas orbit-canvas">{mode === "2d" ? <ForceGraph2D ref={graph2dRef} graphData={data} nodeLabel={(node) => `${node.name} · ${node.kind}`} nodeColor="color" nodeVal={(node) => 1.5 + Math.sqrt(Number(node.degree ?? 0) + 1)} nodeRelSize={4} nodeCanvasObjectMode={() => "after"} nodeCanvasObject={renderLabel} nodePointerAreaPaint={paintNodePointerArea} linkLabel="label" linkWidth={(link) => focusId && (endpointId(link.source) === focusId || endpointId(link.target) === focusId) ? 2.2 : .75} linkColor={(link) => linkColors[String(link.label)] ?? "#566889"} linkDirectionalArrowLength={3.5} linkDirectionalArrowRelPos={1} linkCurvature={.08} cooldownTicks={120} onEngineStop={fitGraph} onNodeClick={(node, event) => { const visualNode = node as VisualNode; centerNode(visualNode); if (event.detail >= 2) navigateTo(visualNode.id); }} onBackgroundClick={() => setSelected(null)} enableNodeDrag enablePanInteraction enableZoomInteraction backgroundColor="#090c13"/> : <ForceGraph3D ref={graph3dRef} graphData={data} nodeLabel={(node) => `${node.name} · ${node.kind}`} nodeColor="color" nodeVal={(node) => 1.5 + Math.sqrt(Number(node.degree ?? 0) + 1)} nodeRelSize={6} nodeThreeObject={render3dLabel} nodeThreeObjectExtend linkLabel="label" linkWidth={(link) => focusId && (endpointId(link.source) === focusId || endpointId(link.target) === focusId) ? 2.2 : 1} linkColor={(link) => linkColors[String(link.label)] ?? "#60769c"} linkOpacity={.68} linkDirectionalArrowLength={4} linkDirectionalParticles={focusId ? 1 : 0} linkDirectionalParticleWidth={1.4} cooldownTicks={120} onEngineStop={fitGraph} onNodeClick={(node, event) => { const visualNode = node as VisualNode; centerNode(visualNode); if (event.detail >= 2) navigateTo(visualNode.id); }} onBackgroundClick={() => setSelected(null)} enableNodeDrag enableNavigationControls backgroundColor="#090c13"/>}</div>
+      <div className="graph-canvas orbit-canvas">{mode === "2d" ? <ForceGraph2D ref={graph2dRef} graphData={data} nodeLabel={(node) => `${node.name} · ${node.kind}`} nodeColor="color" nodeVal={(node) => 1.5 + Math.sqrt(Number(node.degree ?? 0) + 1)} nodeRelSize={4} nodeCanvasObjectMode={() => "after"} nodeCanvasObject={renderLabel} nodePointerAreaPaint={paintNodePointerArea} linkLabel="label" linkWidth={(link) => focusId && (endpointId(link.source) === focusId || endpointId(link.target) === focusId) ? 2.2 : .75} linkColor={(link) => linkColors[String(link.label)] ?? "#566889"} linkDirectionalArrowLength={3.5} linkDirectionalArrowRelPos={1} linkCurvature={.08} cooldownTicks={120} onEngineStop={fitGraph} onNodeClick={(node, event) => { const visualNode = node as VisualNode; centerNode(visualNode); if (event.detail >= 2) void expandNode(visualNode); }} onBackgroundClick={() => setSelected(null)} enableNodeDrag enablePanInteraction enableZoomInteraction backgroundColor="#090c13"/> : <ForceGraph3D ref={graph3dRef} graphData={data} nodeLabel={(node) => `${node.name} · ${node.kind}`} nodeColor="color" nodeVal={(node) => 1.5 + Math.sqrt(Number(node.degree ?? 0) + 1)} nodeRelSize={6} nodeThreeObject={render3dLabel} nodeThreeObjectExtend linkLabel="label" linkWidth={(link) => focusId && (endpointId(link.source) === focusId || endpointId(link.target) === focusId) ? 2.2 : 1} linkColor={(link) => linkColors[String(link.label)] ?? "#60769c"} linkOpacity={.68} linkDirectionalArrowLength={4} linkDirectionalParticles={focusId ? 1 : 0} linkDirectionalParticleWidth={1.4} cooldownTicks={120} onEngineStop={fitGraph} onNodeClick={(node, event) => { const visualNode = node as VisualNode; centerNode(visualNode); if (event.detail >= 2) void expandNode(visualNode); }} onBackgroundClick={() => setSelected(null)} enableNodeDrag enableNavigationControls backgroundColor="#090c13"/>}</div>
 
       <aside className="entity-legend"><div className="overlay-heading"><Layers3 size={14}/><strong>Entities</strong></div>{kindSummary.map(([kind, summary]) => <button className={hiddenKinds.includes(kind) ? "disabled" : ""} key={kind} onClick={() => toggleKind(kind)}><i style={{ background: summary.color }}/><span>{kind}</span><strong>{summary.count.toLocaleString("de-DE")}</strong></button>)}<div className="legend-divider"/><label><span><Tags size={13}/> Show labels</span><input type="checkbox" checked={showLabels} onChange={(event) => setShowLabels(event.target.checked)}/></label></aside>
 
@@ -251,7 +272,7 @@ export function GraphExplorer({
 
       {focusId && <div className="focus-breadcrumb"><Focus size={13}/><span>Neighborhood</span><strong>{graph.nodes.find((node) => node.id === focusId)?.name}</strong><button onClick={() => navigateTo(null)}><X size={13}/></button></div>}
 
-      {selected && <aside className="floating-inspector"><button className="inspector-close" onClick={() => setSelected(null)} aria-label="Close inspector"><X size={14}/></button><span className="type-pill" style={{ color: selected.color }}>{selected.kind}</span><h2>{selected.name}</h2><span className="mono-id">{selected.id}</span><div className="inspector-section"><span className="eyebrow">Properties</span>{Object.entries(selected.properties).slice(0, 8).map(([key, value]) => <div className="detail-row" key={key}><span>{key}</span><strong title={typeof value === "object" ? JSON.stringify(value) : String(value ?? "")}>{typeof value === "object" ? JSON.stringify(value) : String(value ?? "")}</strong></div>)}</div><div className="inspector-section"><span className="eyebrow">Relationships · {selectedRelations.length}</span>{selectedRelations.slice(0, 8).map((relation, index) => <button className="relation-row" key={`${relation.direction}-${relation.objectId}-${index}`} onClick={() => navigateTo(relation.objectId)}><span>{relation.direction === "outgoing" ? "→" : "←"} {relation.label}</span><strong>{relation.object}</strong></button>)}{!selectedRelations.length && <p className="muted-copy">No mapped relationships.</p>}</div><button className="button secondary full" onClick={() => navigateTo(selected.id)}><GitBranch size={14}/> Explore neighborhood</button></aside>}
+      {selected && <aside className="floating-inspector"><button className="inspector-close" onClick={() => setSelected(null)} aria-label="Close inspector"><X size={14}/></button><span className="type-pill" style={{ color: selected.color }}>{selected.kind}</span><h2>{selected.name}</h2><span className="mono-id">{selected.id}</span><div className="inspector-section"><span className="eyebrow">Properties</span>{Object.entries(selected.properties).slice(0, 8).map(([key, value]) => <div className="detail-row" key={key}><span>{key}</span><strong title={typeof value === "object" ? JSON.stringify(value) : String(value ?? "")}>{typeof value === "object" ? JSON.stringify(value) : String(value ?? "")}</strong></div>)}</div><div className="inspector-section"><span className="eyebrow">Relationships · {selectedRelations.length}</span>{selectedRelations.slice(0, 8).map((relation, index) => <button className="relation-row" key={`${relation.direction}-${relation.objectId}-${index}`} onClick={() => navigateTo(relation.objectId)}><span>{relation.direction === "outgoing" ? "→" : "←"} {relation.label}</span><strong>{relation.object}</strong></button>)}{!selectedRelations.length && <p className="muted-copy">No loaded relationships.</p>}</div><button className="button secondary full" disabled={expandingNodeId === selected.id} onClick={() => void expandNode(selected)}><GitBranch size={14}/> {expandingNodeId === selected.id ? "Loading connections…" : "Load connected objects"}</button></aside>}
 
       <div className="explorer-status"><span>Showing {data.nodes.length.toLocaleString("de-DE")} of {graph.nodes.length.toLocaleString("de-DE")} loaded objects · {data.links.length.toLocaleString("de-DE")} visible links{canLoadMore ? " · more available" : ""}</span><span>{mode === "2d" ? "Drag to move · Wheel to zoom · Double-click a node to expand" : "Drag to rotate · Right-drag to pan · Wheel to zoom · Double-click to expand"}</span></div>
     </div>

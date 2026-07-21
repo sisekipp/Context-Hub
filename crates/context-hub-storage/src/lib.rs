@@ -23,8 +23,33 @@ pub struct GraphQuery {
     #[serde(default)]
     pub traversal: Vec<TraversalStep>,
     #[serde(default)]
+    pub sort: Option<GraphSort>,
+    #[serde(default)]
     pub after_object_id: Option<String>,
     pub limit: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphSort {
+    pub property: String,
+    pub direction: SortDirection,
+    pub kind: SortKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SortKind {
+    String,
+    Number,
+    Boolean,
+    Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,10 +199,36 @@ pub fn compile_graph_query(query: &GraphQuery) -> Result<CompiledGraphQuery, Que
     } else {
         String::new()
     };
+    let order = compile_graph_order(query.sort.as_ref(), &current)?;
     let sql = format!(
-        "SELECT DISTINCT {current}.object_id, {current}.object_type, toJSONString({current}.properties) FROM graph_nodes AS n0 FINAL{joins}{index_joins} WHERE n0.workspace_id = ? AND n0.ontology_version_id = ? AND n0.object_type = ? AND n0.deleted = false{filters}{cursor} ORDER BY {current}.object_id LIMIT {limit}"
+        "SELECT DISTINCT {current}.object_id, {current}.object_type, toJSONString({current}.properties) FROM graph_nodes AS n0 FINAL{joins}{index_joins} WHERE n0.workspace_id = ? AND n0.ontology_version_id = ? AND n0.object_type = ? AND n0.deleted = false{filters}{cursor} ORDER BY {order} LIMIT {limit}"
     );
     Ok(CompiledGraphQuery { sql, parameters })
+}
+
+fn compile_graph_order(sort: Option<&GraphSort>, current: &str) -> Result<String, QueryError> {
+    let Some(sort) = sort else {
+        return Ok(format!("{current}.object_id ASC"));
+    };
+    validate_graph_identifier(&sort.property)?;
+    let expression = match sort.kind {
+        SortKind::Number => format!(
+            "toFloat64OrNull(toString({current}.properties.{}))",
+            sort.property
+        ),
+        SortKind::Boolean => format!(
+            "toUInt8OrNull(toString({current}.properties.{}))",
+            sort.property
+        ),
+        SortKind::String | SortKind::Timestamp => {
+            format!("toString({current}.properties.{})", sort.property)
+        }
+    };
+    let direction = match sort.direction {
+        SortDirection::Ascending => "ASC",
+        SortDirection::Descending => "DESC",
+    };
+    Ok(format!("{expression} {direction}, {current}.object_id ASC"))
 }
 
 fn validate_graph_identifier(value: &str) -> Result<(), QueryError> {
@@ -777,6 +828,16 @@ pub trait GraphRepository: Send + Sync {
         object_ids: &[String],
         limit: u32,
     ) -> Result<Vec<StoredEdge>, StorageError>;
+
+    async fn incident_edges(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        object_type: &str,
+        object_id: &str,
+        link_types: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredEdge>, StorageError>;
 }
 
 #[derive(Clone)]
@@ -1019,6 +1080,57 @@ impl GraphRepository for ClickHouseGraphRepository {
             })
             .collect()
     }
+
+    async fn incident_edges(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        object_type: &str,
+        object_id: &str,
+        link_types: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredEdge>, StorageError> {
+        if link_types.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders = std::iter::repeat_n("?", link_types.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT link_type, edge_id, source_type, source_id, target_type, target_id, toJSONString(properties) FROM graph_edges FINAL WHERE workspace_id = ? AND ontology_version_id = ? AND deleted = false AND ((source_type = ? AND source_id = ?) OR (target_type = ? AND target_id = ?)) AND link_type IN ({placeholders}) ORDER BY edge_id LIMIT {}",
+            limit.min(1_000)
+        );
+        let mut query = self
+            .client
+            .query(&sql)
+            .bind(workspace_id.to_string())
+            .bind(ontology_version_id.to_string())
+            .bind(object_type)
+            .bind(object_id)
+            .bind(object_type)
+            .bind(object_id);
+        for link_type in link_types {
+            query = query.bind(link_type);
+        }
+        query
+            .fetch_all::<(String, String, String, String, String, String, String)>()
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(StoredEdge {
+                    workspace_id,
+                    ontology_version_id,
+                    link_type: row.0,
+                    edge_id: row.1,
+                    source_type: row.2,
+                    source_id: row.3,
+                    target_type: row.4,
+                    target_id: row.5,
+                    properties_json: row.6,
+                })
+            })
+            .collect()
+    }
 }
 
 fn parse_properties(value: &str) -> Result<serde_json::Value, StorageError> {
@@ -1130,7 +1242,24 @@ impl GraphRepository for MemoryGraphRepository {
             })
             .map(stored_node_from_write)
             .collect::<Vec<_>>();
-        result.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+        result.sort_by(|left, right| {
+            let ordering = query
+                .sort
+                .as_ref()
+                .map_or(std::cmp::Ordering::Equal, |sort| {
+                    let ordering = compare_graph_properties(
+                        &left.properties_json,
+                        &right.properties_json,
+                        sort,
+                    );
+                    if sort.direction == SortDirection::Descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    }
+                });
+            ordering.then(left.object_id.cmp(&right.object_id))
+        });
         let limit = if query.limit == 0 { 500 } else { query.limit };
         result.truncate(limit.min(5_000) as usize);
         Ok(result)
@@ -1191,6 +1320,45 @@ impl GraphRepository for MemoryGraphRepository {
         result.truncate(limit.min(20_000) as usize);
         Ok(result)
     }
+
+    async fn incident_edges(
+        &self,
+        workspace_id: Uuid,
+        ontology_version_id: Uuid,
+        object_type: &str,
+        object_id: &str,
+        link_types: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredEdge>, StorageError> {
+        let allowed = link_types.iter().collect::<HashSet<_>>();
+        let mut result = self
+            .edges
+            .read()
+            .await
+            .values()
+            .filter(|edge| {
+                edge.workspace_id == workspace_id
+                    && edge.ontology_version_id == ontology_version_id
+                    && allowed.contains(&edge.link_type)
+                    && ((edge.source_type == object_type && edge.source_id == object_id)
+                        || (edge.target_type == object_type && edge.target_id == object_id))
+            })
+            .map(|edge| StoredEdge {
+                workspace_id,
+                ontology_version_id,
+                link_type: edge.link_type.clone(),
+                edge_id: edge.edge_id.clone(),
+                source_type: edge.source_type.clone(),
+                source_id: edge.source_id.clone(),
+                target_type: edge.target_type.clone(),
+                target_id: edge.target_id.clone(),
+                properties_json: edge.properties_json.clone(),
+            })
+            .collect::<Vec<_>>();
+        result.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
+        result.truncate(limit.min(1_000) as usize);
+        Ok(result)
+    }
 }
 
 fn stored_node_from_write(node: &GraphNodeWrite) -> StoredNode {
@@ -1200,6 +1368,28 @@ fn stored_node_from_write(node: &GraphNodeWrite) -> StoredNode {
         object_type: node.object_type.clone(),
         object_id: node.object_id.clone(),
         properties_json: node.properties_json.clone(),
+    }
+}
+
+fn compare_graph_properties(left: &str, right: &str, sort: &GraphSort) -> std::cmp::Ordering {
+    let left = serde_json::from_str::<serde_json::Value>(left)
+        .ok()
+        .and_then(|properties| properties.get(&sort.property).cloned());
+    let right = serde_json::from_str::<serde_json::Value>(right)
+        .ok()
+        .and_then(|properties| properties.get(&sort.property).cloned());
+    match sort.kind {
+        SortKind::Number => left
+            .and_then(|value| value.as_f64())
+            .partial_cmp(&right.and_then(|value| value.as_f64()))
+            .unwrap_or(std::cmp::Ordering::Equal),
+        SortKind::Boolean => left
+            .and_then(|value| value.as_bool())
+            .cmp(&right.and_then(|value| value.as_bool())),
+        SortKind::String | SortKind::Timestamp => left
+            .as_ref()
+            .map_or_else(String::new, json_scalar_string)
+            .cmp(&right.as_ref().map_or_else(String::new, json_scalar_string)),
     }
 }
 
@@ -1264,6 +1454,7 @@ mod tests {
                 target_type: "team".into(),
                 reverse: false,
             }],
+            sort: None,
             after_object_id: None,
             limit: 50,
         };
@@ -1286,6 +1477,7 @@ mod tests {
                 index_kind: Some(PropertyIndexKind::Number),
             }],
             traversal: vec![],
+            sort: None,
             after_object_id: None,
             limit: 50,
         };
@@ -1319,6 +1511,7 @@ mod tests {
                     reverse: false,
                 })
                 .collect(),
+            sort: None,
             after_object_id: None,
             limit: 10,
         };
@@ -1336,6 +1529,7 @@ mod tests {
             root_type: "service".into(),
             filters: vec![],
             traversal: vec![],
+            sort: None,
             after_object_id: Some("service:billing".into()),
             limit: 25,
         };
@@ -1373,6 +1567,7 @@ mod tests {
                 root_type: "service".into(),
                 filters: vec![],
                 traversal: vec![],
+                sort: None,
                 after_object_id: None,
                 limit: 10,
             })
@@ -1392,6 +1587,7 @@ mod tests {
                     target_type: "team".into(),
                     reverse: false,
                 }],
+                sort: None,
                 after_object_id: None,
                 limit: 10,
             })
@@ -1523,6 +1719,7 @@ mod tests {
                         index_kind: Some(index_kind),
                     }],
                     traversal: vec![],
+                    sort: None,
                     after_object_id: None,
                     limit: 10,
                 })

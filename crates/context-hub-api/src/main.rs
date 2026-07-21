@@ -1,14 +1,19 @@
-use std::{collections::HashMap, fmt::Write as _, net::SocketAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+    net::SocketAddr,
+    sync::Arc,
+};
 
 use chrono::{DateTime, NaiveDate, Utc};
 #[cfg(test)]
 use context_hub_api::context_hub::v1::GraphFilter as ApiGraphFilter;
 use context_hub_api::context_hub::v1::{
     CreateOntologyRequest, DataSource, DataSourceUsage, DeleteDataSourceRequest,
-    GetDataSourceUsageRequest, GetDataSourceUsageResponse, GetIngestionJobRequest,
-    GetObjectRequest, GetOntologyDraftRequest, GetUploadDataSourceRequest,
-    GetUploadDataSourceResponse, GetWorkspaceRequest, GraphEdge, GraphNode, GraphQuery,
-    ImportGraphRequest, IngestionJob, IngestionState, ListDataSourcesRequest,
+    ExpandGraphRequest, GetDataSourceUsageRequest, GetDataSourceUsageResponse,
+    GetIngestionJobRequest, GetObjectRequest, GetOntologyDraftRequest, GetUploadDataSourceRequest,
+    GetUploadDataSourceResponse, GetWorkspaceRequest, GraphAggregationResult, GraphEdge, GraphNode,
+    GraphQuery, ImportGraphRequest, IngestionJob, IngestionState, ListDataSourcesRequest,
     ListDataSourcesResponse, ListOntologiesRequest, ListOntologiesResponse,
     ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse, ListOntologyVersionsRequest,
     ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology, OntologyDataMapping,
@@ -23,6 +28,10 @@ use context_hub_api::context_hub::v1::{
     ontology_service_server::{OntologyService, OntologyServiceServer},
     workspace_service_server::{WorkspaceService, WorkspaceServiceServer},
 };
+#[cfg(test)]
+use context_hub_api::context_hub::v1::{GraphAggregation, GraphSort};
+#[cfg(test)]
+use context_hub_domain::{Cardinality, LinkTypeDefinition};
 use context_hub_domain::{
     ObjectTypeDefinition, OntologyDefinition, PropertyDefinition, ScalarType, ValueType,
 };
@@ -34,10 +43,11 @@ use context_hub_storage::{
     ClickHouseControlPlaneRepository, ClickHouseGraphRepository, ControlPlaneRepository,
     ControlPlaneSnapshot, FilterOperator as StorageFilterOperator, GraphEdgeWrite,
     GraphFilter as StorageGraphFilter, GraphNodeWrite, GraphQuery as StorageGraphQuery,
-    GraphRepository, ObjectStoreSourceRepository, PropertyIndexKind, PropertyIndexValue,
-    PropertyIndexWrite, SourceObjectStore, StorageError, StoredDataSource, StoredIngestionJob,
-    StoredOntology, StoredOntologyDraft, StoredOntologyMapping, StoredOntologyVersion,
-    TraversalStep as StorageTraversalStep,
+    GraphRepository, GraphSort as StorageGraphSort, ObjectStoreSourceRepository, PropertyIndexKind,
+    PropertyIndexValue, PropertyIndexWrite, SortDirection as StorageSortDirection,
+    SortKind as StorageSortKind, SourceObjectStore, StorageError, StoredDataSource,
+    StoredIngestionJob, StoredOntology, StoredOntologyDraft, StoredOntologyMapping,
+    StoredOntologyVersion, TraversalStep as StorageTraversalStep,
 };
 #[cfg(test)]
 use context_hub_storage::{MemoryGraphRepository, MemorySourceObjectStore};
@@ -1486,6 +1496,7 @@ impl IngestionService for Runtime {
 
 #[tonic::async_trait]
 impl GraphService for Runtime {
+    #[allow(clippy::too_many_lines)]
     async fn query(
         &self,
         request: Request<GraphQuery>,
@@ -1530,7 +1541,7 @@ impl GraphService for Runtime {
                     .expect("validated graph query limits fit into usize");
             if let Some(last) = prefix_nodes.last() {
                 cursor.positions[depth].after_object_id = Some(last.object_id.clone());
-                cursor.positions[depth].done = !has_more;
+                cursor.positions[depth].done = storage_query.sort.is_some() || !has_more;
             } else {
                 cursor.positions[depth].done = true;
             }
@@ -1539,9 +1550,37 @@ impl GraphService for Runtime {
             }
         }
         let mut nodes = nodes_by_key.into_values().collect::<Vec<_>>();
-        nodes.sort_by(|left, right| {
-            (&left.object_type, &left.object_id).cmp(&(&right.object_type, &right.object_id))
-        });
+        if let Some(sort) = &query.sort {
+            let property = definition
+                .object_types
+                .iter()
+                .find(|object_type| object_type.api_name == query.root_type)
+                .and_then(|object_type| {
+                    object_type
+                        .properties
+                        .iter()
+                        .find(|property| property.api_name == sort.property)
+                })
+                .expect("sort properties are validated before query execution");
+            nodes.sort_by(|left, right| {
+                let ordering = compare_graph_property_values(
+                    &left.properties_json,
+                    &right.properties_json,
+                    property,
+                );
+                let ordering = if sort.direction == 2 {
+                    ordering.reverse()
+                } else {
+                    ordering
+                };
+                ordering.then(left.object_id.cmp(&right.object_id))
+            });
+        } else {
+            nodes.sort_by(|left, right| {
+                (&left.object_type, &left.object_id).cmp(&(&right.object_type, &right.object_id))
+            });
+        }
+        let aggregation_results = graph_aggregation_results(&query, &nodes)?;
         let object_ids = nodes
             .iter()
             .map(|node| node.object_id.clone())
@@ -1561,12 +1600,20 @@ impl GraphService for Runtime {
         Ok(Response::new(QueryGraphResponse {
             nodes: nodes
                 .into_iter()
-                .map(|node| GraphNode {
-                    id: node.object_id,
-                    object_type: node.object_type,
-                    properties_json: node.properties_json,
+                .map(|node| {
+                    let properties_json = project_graph_properties(
+                        &node.properties_json,
+                        &node.object_type,
+                        &query.root_type,
+                        &query.projection,
+                    )?;
+                    Ok(GraphNode {
+                        id: node.object_id,
+                        object_type: node.object_type,
+                        properties_json,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, Status>>()?,
             edges: edges
                 .into_iter()
                 .map(|edge| GraphEdge {
@@ -1579,6 +1626,7 @@ impl GraphService for Runtime {
                 .collect(),
             next_cursor,
             truncated,
+            aggregation_results,
         }))
     }
     async fn get_object(
@@ -1614,6 +1662,127 @@ impl GraphService for Runtime {
             id: node.object_id,
             object_type: node.object_type,
             properties_json: node.properties_json,
+        }))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn expand(
+        &self,
+        request: Request<ExpandGraphRequest>,
+    ) -> Result<Response<QueryGraphResponse>, Status> {
+        let request = request.into_inner();
+        let version = self
+            .ontology_version(&request.workspace_id, &request.ontology_version_id)
+            .await?;
+        let definition: OntologyDefinition = serde_json::from_str(&version.definition_json)
+            .map_err(|error| Status::internal(format!("stored ontology is invalid: {error}")))?;
+        if !definition
+            .object_types
+            .iter()
+            .any(|object_type| object_type.api_name == request.object_type)
+        {
+            return Err(Status::invalid_argument("object type does not exist"));
+        }
+        if request.object_id.is_empty() || request.object_id.len() > 512 {
+            return Err(Status::invalid_argument("object id is invalid"));
+        }
+        let limit = if request.limit == 0 {
+            100
+        } else {
+            request.limit
+        };
+        if limit > 500 {
+            return Err(Status::invalid_argument(
+                "expansion limit exceeds 500 edges",
+            ));
+        }
+        let available_links = definition
+            .link_types
+            .iter()
+            .filter(|link| {
+                link.source_type == request.object_type || link.target_type == request.object_type
+            })
+            .map(|link| link.api_name.clone())
+            .collect::<HashSet<_>>();
+        let link_types = if request.link_types.is_empty() {
+            available_links.iter().cloned().collect::<Vec<_>>()
+        } else {
+            request.link_types
+        };
+        if link_types
+            .iter()
+            .any(|link| !available_links.contains(link))
+        {
+            return Err(Status::invalid_argument(
+                "expansion contains a link type that does not connect to the object type",
+            ));
+        }
+        let workspace_id = parse_uuid(&request.workspace_id, "workspace_id")?;
+        let ontology_version_id = parse_uuid(&request.ontology_version_id, "ontology_version_id")?;
+        let center = self
+            .graph
+            .get_node(
+                workspace_id,
+                ontology_version_id,
+                &request.object_type,
+                &request.object_id,
+            )
+            .await
+            .map_err(storage_status)?;
+        let edges = self
+            .graph
+            .incident_edges(
+                workspace_id,
+                ontology_version_id,
+                &request.object_type,
+                &request.object_id,
+                &link_types,
+                limit,
+            )
+            .await
+            .map_err(storage_status)?;
+        let mut nodes = HashMap::from([(
+            (center.object_type.clone(), center.object_id.clone()),
+            center,
+        )]);
+        for edge in &edges {
+            let (object_type, object_id) = if edge.source_id == request.object_id {
+                (&edge.target_type, &edge.target_id)
+            } else {
+                (&edge.source_type, &edge.source_id)
+            };
+            if nodes.contains_key(&(object_type.clone(), object_id.clone())) {
+                continue;
+            }
+            let node = self
+                .graph
+                .get_node(workspace_id, ontology_version_id, object_type, object_id)
+                .await
+                .map_err(storage_status)?;
+            nodes.insert((node.object_type.clone(), node.object_id.clone()), node);
+        }
+        Ok(Response::new(QueryGraphResponse {
+            nodes: nodes
+                .into_values()
+                .map(|node| GraphNode {
+                    id: node.object_id,
+                    object_type: node.object_type,
+                    properties_json: node.properties_json,
+                })
+                .collect(),
+            edges: edges
+                .into_iter()
+                .map(|edge| GraphEdge {
+                    id: edge.edge_id,
+                    link_type: edge.link_type,
+                    source_id: edge.source_id,
+                    target_id: edge.target_id,
+                    properties_json: edge.properties_json,
+                })
+                .collect(),
+            next_cursor: String::new(),
+            truncated: false,
+            aggregation_results: vec![],
         }))
     }
 }
@@ -1818,6 +1987,143 @@ fn indexed_type_error(object_type: &str, property: &PropertyDefinition) -> Strin
     )
 }
 
+fn compare_graph_property_values(
+    left: &str,
+    right: &str,
+    property: &PropertyDefinition,
+) -> std::cmp::Ordering {
+    let value = |json: &str| {
+        serde_json::from_str::<serde_json::Value>(json)
+            .ok()
+            .and_then(|properties| properties.get(&property.api_name).cloned())
+    };
+    let left = value(left);
+    let right = value(right);
+    match &property.value_type.scalar {
+        ScalarType::Int64 | ScalarType::Float64 | ScalarType::Decimal => left
+            .and_then(|value| value.as_f64())
+            .partial_cmp(&right.and_then(|value| value.as_f64()))
+            .unwrap_or(std::cmp::Ordering::Equal),
+        ScalarType::Boolean => left
+            .and_then(|value| value.as_bool())
+            .cmp(&right.and_then(|value| value.as_bool())),
+        _ => left
+            .as_ref()
+            .map_or_else(String::new, graph_json_scalar)
+            .cmp(&right.as_ref().map_or_else(String::new, graph_json_scalar)),
+    }
+}
+
+fn graph_json_scalar(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_owned)
+}
+
+fn project_graph_properties(
+    properties_json: &str,
+    object_type: &str,
+    root_type: &str,
+    projection: &[String],
+) -> Result<String, Status> {
+    if projection.is_empty() || object_type != root_type {
+        return Ok(properties_json.to_owned());
+    }
+    let properties: serde_json::Map<String, serde_json::Value> = serde_json::from_str::<
+        serde_json::Value,
+    >(properties_json)
+    .map_err(|error| Status::internal(format!("stored graph properties are invalid: {error}")))?
+    .as_object()
+    .cloned()
+    .ok_or_else(|| Status::internal("stored graph properties are not an object"))?;
+    let projected = projection
+        .iter()
+        .filter_map(|property| {
+            properties
+                .get(property)
+                .cloned()
+                .map(|value| (property.clone(), value))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::to_string(&projected)
+        .map_err(|error| Status::internal(format!("graph projection failed: {error}")))
+}
+
+fn graph_aggregation_results(
+    query: &GraphQuery,
+    nodes: &[context_hub_storage::StoredNode],
+) -> Result<Vec<GraphAggregationResult>, Status> {
+    let root_properties = nodes
+        .iter()
+        .filter(|node| node.object_type == query.root_type)
+        .map(|node| {
+            serde_json::from_str::<serde_json::Value>(&node.properties_json).map_err(|error| {
+                Status::internal(format!("stored graph properties are invalid: {error}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    query
+        .aggregations
+        .iter()
+        .map(|aggregation| {
+            let values = root_properties
+                .iter()
+                .filter_map(|properties| properties.get(&aggregation.property))
+                .filter(|value| !value.is_null())
+                .collect::<Vec<_>>();
+            let value = match aggregation.function {
+                1 => serde_json::json!(if aggregation.property.is_empty() {
+                    root_properties.len()
+                } else {
+                    values.len()
+                }),
+                2 => serde_json::json!(
+                    values
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<HashSet<_>>()
+                        .len()
+                ),
+                3..=6 => {
+                    let numbers = values
+                        .iter()
+                        .filter_map(|value| value.as_f64())
+                        .collect::<Vec<_>>();
+                    match aggregation.function {
+                        3 => serde_json::json!(numbers.iter().sum::<f64>()),
+                        4 => {
+                            if numbers.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                let count = u32::try_from(numbers.len())
+                                    .expect("graph query limits fit into u32");
+                                serde_json::json!(numbers.iter().sum::<f64>() / f64::from(count))
+                            }
+                        }
+                        5 => numbers
+                            .iter()
+                            .copied()
+                            .reduce(f64::min)
+                            .map_or(serde_json::Value::Null, |value| serde_json::json!(value)),
+                        6 => numbers
+                            .iter()
+                            .copied()
+                            .reduce(f64::max)
+                            .map_or(serde_json::Value::Null, |value| serde_json::json!(value)),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => return Err(Status::invalid_argument("unsupported aggregation function")),
+            };
+            Ok(GraphAggregationResult {
+                alias: aggregation.alias.clone(),
+                value_json: value.to_string(),
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_lines)]
 fn validate_graph_query(query: &GraphQuery, definition: &OntologyDefinition) -> Result<(), Status> {
     if query.cursor.len() > 16_384 {
         return Err(Status::invalid_argument("graph query cursor is too large"));
@@ -1842,6 +2148,75 @@ fn validate_graph_query(query: &GraphQuery, definition: &OntologyDefinition) -> 
                 "property '{}.{}' does not exist",
                 root.api_name, filter.property
             )));
+        }
+    }
+    for property in &query.projection {
+        if !root
+            .properties
+            .iter()
+            .any(|candidate| candidate.api_name == *property)
+        {
+            return Err(Status::invalid_argument(format!(
+                "projection property '{}.{}' does not exist",
+                root.api_name, property
+            )));
+        }
+    }
+    if let Some(sort) = &query.sort {
+        if !query.traversal.is_empty() {
+            return Err(Status::invalid_argument(
+                "custom sorting cannot be combined with traversal in V1",
+            ));
+        }
+        if !query.cursor.is_empty() {
+            return Err(Status::invalid_argument(
+                "custom sorted queries do not support continuation cursors",
+            ));
+        }
+        if !matches!(sort.direction, 1 | 2) {
+            return Err(Status::invalid_argument("sort direction is unspecified"));
+        }
+        if !root
+            .properties
+            .iter()
+            .any(|property| property.api_name == sort.property)
+        {
+            return Err(Status::invalid_argument("sort property does not exist"));
+        }
+    }
+    if query.aggregations.len() > 8 {
+        return Err(Status::invalid_argument(
+            "at most 8 aggregations are allowed",
+        ));
+    }
+    let mut aliases = HashSet::new();
+    for aggregation in &query.aggregations {
+        validate_api_name(&aggregation.alias)?;
+        if !aliases.insert(&aggregation.alias) {
+            return Err(Status::invalid_argument(
+                "aggregation aliases must be unique",
+            ));
+        }
+        if aggregation.function == 1 && aggregation.property.is_empty() {
+            continue;
+        }
+        let property = root
+            .properties
+            .iter()
+            .find(|property| property.api_name == aggregation.property)
+            .ok_or_else(|| Status::invalid_argument("aggregation property does not exist"))?;
+        if matches!(aggregation.function, 3..=6)
+            && !matches!(
+                &property.value_type.scalar,
+                ScalarType::Int64 | ScalarType::Float64 | ScalarType::Decimal
+            )
+        {
+            return Err(Status::invalid_argument(
+                "sum, average, minimum, and maximum require a numeric property",
+            ));
+        }
+        if !matches!(aggregation.function, 1..=6) {
+            return Err(Status::invalid_argument("unsupported aggregation function"));
         }
     }
     let mut current_type = query.root_type.as_str();
@@ -1958,6 +2333,31 @@ fn graph_query_to_storage(
                 reverse: step.reverse,
             })
             .collect(),
+        sort: query.sort.as_ref().map(|sort| {
+            let property = root
+                .properties
+                .iter()
+                .find(|property| property.api_name == sort.property)
+                .expect("sort properties are validated before storage compilation");
+            let kind = match &property.value_type.scalar {
+                ScalarType::Int64 | ScalarType::Float64 | ScalarType::Decimal => {
+                    StorageSortKind::Number
+                }
+                ScalarType::Boolean => StorageSortKind::Boolean,
+                ScalarType::Date | ScalarType::Timestamp => StorageSortKind::Timestamp,
+                _ => StorageSortKind::String,
+            };
+            let direction = if sort.direction == 2 {
+                StorageSortDirection::Descending
+            } else {
+                StorageSortDirection::Ascending
+            };
+            StorageGraphSort {
+                property: sort.property.clone(),
+                direction,
+                kind,
+            }
+        }),
         after_object_id: None,
         limit,
     })
@@ -2638,10 +3038,65 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn imported_graph_is_queryable_only_through_its_ontology_version() {
         let runtime = Runtime::seeded().await;
         let ontology_id =
             Uuid::new_v5(&Uuid::NAMESPACE_URL, b"context-hub/dev/service-map").to_string();
+        {
+            let mut drafts = runtime.drafts.write().await;
+            let draft = drafts.get_mut(&ontology_id).unwrap();
+            let mut definition: OntologyDefinition =
+                serde_json::from_str(&draft.definition_json).unwrap();
+            definition.object_types[0]
+                .properties
+                .push(PropertyDefinition {
+                    api_name: "name".into(),
+                    display_name: "Name".into(),
+                    value_type: ValueType {
+                        scalar: ScalarType::String,
+                        list: false,
+                    },
+                    required: false,
+                    unique: false,
+                    identity: false,
+                    indexed: false,
+                    description: None,
+                });
+            definition.object_types.push(ObjectTypeDefinition {
+                api_name: "team".into(),
+                display_name: "Team".into(),
+                description: None,
+                properties: vec![PropertyDefinition {
+                    api_name: "id".into(),
+                    display_name: "ID".into(),
+                    value_type: ValueType {
+                        scalar: ScalarType::String,
+                        list: false,
+                    },
+                    required: true,
+                    unique: true,
+                    identity: true,
+                    indexed: true,
+                    description: None,
+                }],
+                shared_properties: vec![],
+                derived_properties: vec![],
+                implements: vec![],
+            });
+            definition.link_types.push(LinkTypeDefinition {
+                api_name: "owned_by".into(),
+                display_name: "Owned by".into(),
+                source_type: "service".into(),
+                target_type: "team".into(),
+                source_cardinality: Cardinality::Many,
+                target_cardinality: Cardinality::One,
+                required: false,
+                properties: vec![],
+                description: None,
+            });
+            draft.definition_json = serde_json::to_string(&definition).unwrap();
+        }
         let version = runtime
             .publish(Request::new(PublishOntologyRequest {
                 ontology_id: ontology_id.clone(),
@@ -2695,14 +3150,26 @@ mod tests {
                     object_type: "service".into(),
                     properties_json: format!(r#"{{"id":"{id}","name":"{name}"}}"#),
                 })
+                .chain(std::iter::once(GraphNode {
+                    id: "team:platform".into(),
+                    object_type: "team".into(),
+                    properties_json: r#"{"id":"platform","name":"Platform"}"#.into(),
+                }))
                 .collect(),
-                edges: vec![],
+                edges: vec![GraphEdge {
+                    id: "owned_by:billing:platform".into(),
+                    link_type: "owned_by".into(),
+                    source_id: "service:billing".into(),
+                    target_id: "team:platform".into(),
+                    properties_json: "{}".into(),
+                }],
             }))
             .await
             .expect("mapped graph can be imported")
             .into_inner();
         assert_eq!(job.state, IngestionState::Succeeded as i32);
-        assert_eq!(job.nodes_written, 3);
+        assert_eq!(job.nodes_written, 4);
+        assert_eq!(job.edges_written, 1);
 
         let graph = query_service_page(&runtime, &version.id, 2, String::new()).await;
         assert_eq!(graph.nodes.len(), 2);
@@ -2715,6 +3182,50 @@ mod tests {
         assert_eq!(next_page.nodes[0].id, "service:users");
         assert!(next_page.next_cursor.is_empty());
         assert!(!next_page.truncated);
+
+        let custom = runtime
+            .query(Request::new(GraphQuery {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version.id.clone(),
+                root_type: "service".into(),
+                filters: vec![],
+                traversal: vec![],
+                projection: vec!["name".into()],
+                limit: 10,
+                cursor: String::new(),
+                sort: Some(GraphSort {
+                    property: "name".into(),
+                    direction: 2,
+                }),
+                aggregations: vec![GraphAggregation {
+                    property: String::new(),
+                    function: 1,
+                    alias: "service_count".into(),
+                }],
+            }))
+            .await
+            .expect("sorted projected graph query can run")
+            .into_inner();
+        assert_eq!(custom.nodes[0].id, "service:users");
+        assert_eq!(custom.nodes.len(), 3);
+        assert_eq!(custom.nodes[0].properties_json, r#"{"name":"Users"}"#);
+        assert_eq!(custom.aggregation_results[0].value_json, "3");
+        assert!(!custom.truncated);
+
+        let expansion = runtime
+            .expand(Request::new(ExpandGraphRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version.id.clone(),
+                object_type: "service".into(),
+                object_id: "service:billing".into(),
+                link_types: vec!["owned_by".into()],
+                limit: 20,
+            }))
+            .await
+            .expect("one-hop graph neighborhood can be expanded")
+            .into_inner();
+        assert_eq!(expansion.nodes.len(), 2);
+        assert_eq!(expansion.edges.len(), 1);
 
         let object = runtime
             .get_object(Request::new(GetObjectRequest {
@@ -2743,6 +3254,8 @@ mod tests {
                 filters: vec![],
                 traversal: vec![],
                 projection: vec![],
+                sort: None,
+                aggregations: vec![],
                 limit,
                 cursor,
             }))
@@ -2967,6 +3480,8 @@ mod tests {
                 }],
                 traversal: vec![],
                 projection: vec![],
+                sort: None,
+                aggregations: vec![],
                 limit: 10,
                 cursor: String::new(),
             }))

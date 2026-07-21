@@ -3,11 +3,14 @@ import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import {
   DataSourceService,
   DataSourceKind,
+  AggregationFunction,
+  FilterOperator,
   GraphService,
   IngestionService,
   IngestionState,
   OntologyService,
   SourceFileFormat,
+  SortDirection,
 } from "@/gen/context_hub/v1/context_hub_pb";
 import type { OntologyCatalog } from "@/lib/ontology-catalog";
 import type { GraphValue, ImportedGraph } from "@/lib/graph-data";
@@ -84,6 +87,16 @@ export type BackendLinkMapping = {
   targetObjectType: string;
   targetIdentityProperty: string;
   missingTarget: "create" | "skip" | "error";
+};
+
+export type GraphQuerySpec = {
+  rootType: string;
+  filters: Array<{ property: string; operator: "equal" | "not_equal" | "contains" | "greater_than" | "less_than"; value: string }>;
+  traversal: Array<{ linkType: string; targetType: string; reverse: boolean }>;
+  projection: string[];
+  sort?: { property: string; direction: "ascending" | "descending" };
+  aggregations: Array<{ property: string; function: "count" | "distinct_count" | "sum" | "average" | "minimum" | "maximum"; alias: string }>;
+  limit: number;
 };
 
 function sourceFormat(fileName: string): SourceFileFormat {
@@ -483,4 +496,100 @@ export async function loadPersistedGraph(
     },
     pagination: { cursors: nextCursors, hasMore: nextCursors.some((cursor) => cursor !== null) },
   };
+}
+
+const filterOperators: Record<GraphQuerySpec["filters"][number]["operator"], FilterOperator> = {
+  equal: FilterOperator.EQUAL,
+  not_equal: FilterOperator.NOT_EQUAL,
+  contains: FilterOperator.CONTAINS,
+  greater_than: FilterOperator.GREATER_THAN,
+  less_than: FilterOperator.LESS_THAN,
+};
+
+const aggregationFunctions: Record<GraphQuerySpec["aggregations"][number]["function"], AggregationFunction> = {
+  count: AggregationFunction.COUNT,
+  distinct_count: AggregationFunction.DISTINCT_COUNT,
+  sum: AggregationFunction.SUM,
+  average: AggregationFunction.AVERAGE,
+  minimum: AggregationFunction.MINIMUM,
+  maximum: AggregationFunction.MAXIMUM,
+};
+
+function importedGraphFromResponse(
+  response: Awaited<ReturnType<typeof graph.query>>,
+  ontology: BackendOntology,
+  catalog: OntologyCatalog,
+): ImportedGraph {
+  const nodes = response.nodes.map((node) => {
+    const objectType = catalog.objectTypes.find((type) => type.apiName === node.objectType);
+    const properties = JSON.parse(node.propertiesJson || "{}") as Record<string, GraphValue>;
+    const colorIndex = Math.max(0, catalog.objectTypes.findIndex((type) => type.apiName === node.objectType));
+    return {
+      id: node.id,
+      name: String(properties.name ?? properties.id ?? node.id),
+      kind: objectType?.displayName ?? node.objectType,
+      group: objectType?.displayName ?? node.objectType,
+      color: graphColors[colorIndex % graphColors.length],
+      properties,
+    };
+  });
+  return {
+    nodes,
+    links: response.edges.map((edge) => ({
+      source: edge.sourceId,
+      target: edge.targetId,
+      label: edge.linkType,
+      properties: JSON.parse(edge.propertiesJson || "{}") as Record<string, GraphValue>,
+    })),
+    sourceName: `${ontology.name} · Query`,
+    importedAt: new Date().toISOString(),
+    recordCount: nodes.length,
+    skippedCount: 0,
+    linkErrorCount: 0,
+    ontologyBindings: {
+      objectTypes: catalog.objectTypes.map((type) => type.apiName),
+      linkTypes: catalog.linkTypes.map((type) => type.apiName),
+    },
+    aggregations: response.aggregationResults.map((result) => ({ alias: result.alias, value: JSON.parse(result.valueJson) as GraphValue })),
+  };
+}
+
+export async function queryPersistedGraph(
+  ontology: BackendOntology,
+  catalog: OntologyCatalog,
+  spec: GraphQuerySpec,
+): Promise<ImportedGraph> {
+  if (!ontology.activeVersionId) throw new Error("Publish the ontology before querying its graph.");
+  const response = await graph.query({
+    workspaceId: DEV_WORKSPACE_ID,
+    ontologyVersionId: ontology.activeVersionId,
+    rootType: spec.rootType,
+    filters: spec.filters.map((filter) => ({ property: filter.property, operator: filterOperators[filter.operator], values: [filter.value] })),
+    traversal: spec.traversal,
+    projection: spec.projection,
+    limit: spec.limit,
+    cursor: "",
+    sort: spec.sort ? { property: spec.sort.property, direction: spec.sort.direction === "descending" ? SortDirection.DESCENDING : SortDirection.ASCENDING } : undefined,
+    aggregations: spec.aggregations.map((aggregation) => ({ property: aggregation.property, function: aggregationFunctions[aggregation.function], alias: aggregation.alias })),
+  });
+  return importedGraphFromResponse(response, ontology, catalog);
+}
+
+export async function expandPersistedGraphNode(
+  ontology: BackendOntology,
+  catalog: OntologyCatalog,
+  objectType: string,
+  objectId: string,
+  linkTypes: string[],
+): Promise<ImportedGraph> {
+  if (!ontology.activeVersionId) throw new Error("Publish the ontology before expanding graph objects.");
+  const response = await graph.expand({
+    workspaceId: DEV_WORKSPACE_ID,
+    ontologyVersionId: ontology.activeVersionId,
+    objectType,
+    objectId,
+    linkTypes,
+    limit: 250,
+  });
+  return importedGraphFromResponse(response, ontology, catalog);
 }

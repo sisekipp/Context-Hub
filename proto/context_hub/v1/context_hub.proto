@@ -247,6 +247,29 @@ message TraversalStep {
   string target_type = 2;
   bool reverse = 3;
 }
+enum SortDirection {
+  SORT_DIRECTION_UNSPECIFIED = 0;
+  SORT_DIRECTION_ASCENDING = 1;
+  SORT_DIRECTION_DESCENDING = 2;
+}
+message GraphSort {
+  string property = 1;
+  SortDirection direction = 2;
+}
+enum AggregationFunction {
+  AGGREGATION_FUNCTION_UNSPECIFIED = 0;
+  AGGREGATION_FUNCTION_COUNT = 1;
+  AGGREGATION_FUNCTION_DISTINCT_COUNT = 2;
+  AGGREGATION_FUNCTION_SUM = 3;
+  AGGREGATION_FUNCTION_AVERAGE = 4;
+  AGGREGATION_FUNCTION_MINIMUM = 5;
+  AGGREGATION_FUNCTION_MAXIMUM = 6;
+}
+message GraphAggregation {
+  string property = 1;
+  AggregationFunction function = 2;
+  string alias = 3;
+}
 message GraphQuery {
   string workspace_id = 1;
   string ontology_version_id = 2;
@@ -256,6 +279,8 @@ message GraphQuery {
   repeated string projection = 6;
   uint32 limit = 7;
   string cursor = 8;
+  GraphSort sort = 9;
+  repeated GraphAggregation aggregations = 10;
 }
 message GraphNode {
   string id = 1;
@@ -274,6 +299,11 @@ message QueryGraphResponse {
   repeated GraphEdge edges = 2;
   string next_cursor = 3;
   bool truncated = 4;
+  repeated GraphAggregationResult aggregation_results = 5;
+}
+message GraphAggregationResult {
+  string alias = 1;
+  string value_json = 2;
 }
 message GetObjectRequest {
   string workspace_id = 1;
@@ -281,8 +311,17 @@ message GetObjectRequest {
   string object_type = 3;
   string id = 4;
 }
+message ExpandGraphRequest {
+  string workspace_id = 1;
+  string ontology_version_id = 2;
+  string object_type = 3;
+  string object_id = 4;
+  repeated string link_types = 5;
+  uint32 limit = 6;
+}
 
 service GraphService {
   rpc Query(GraphQuery) returns (QueryGraphResponse);
   rpc GetObject(GetObjectRequest) returns (GraphNode);
+  rpc Expand(ExpandGraphRequest) returns (QueryGraphResponse);
 }
