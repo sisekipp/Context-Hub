@@ -5,6 +5,7 @@ import {
   DataSourceKind,
   AggregationFunction,
   FilterOperator,
+  FunctionService,
   GraphService,
   IngestionService,
   IngestionState,
@@ -27,6 +28,7 @@ const dataSources = createClient(DataSourceService, transport);
 const ontologies = createClient(OntologyService, transport);
 const ingestions = createClient(IngestionService, transport);
 const graph = createClient(GraphService, transport);
+const functions = createClient(FunctionService, transport);
 
 export type BackendOntology = { id: string; name: string; slug: string; activeVersionId: string };
 export type BackendDataSource = { id: string; name: string; fileName: string; kind: "upload" | "rest" | "graphql"; configurationJson: string };
@@ -336,7 +338,25 @@ function ontologyDefinition(name: string, slug: string, catalog: OntologyCatalog
       properties: [],
       description: null,
     })),
-    interfaces: [], value_types: [], struct_types: [], shared_properties: [], functions: [],
+    interfaces: [], value_types: [], struct_types: [], shared_properties: [],
+    functions: catalog.functions.map((ontologyFunction) => ({
+      api_name: ontologyFunction.apiName,
+      display_name: ontologyFunction.displayName,
+      description: ontologyFunction.description || null,
+      inputs: ontologyFunction.inputs.map((input) => ({
+        api_name: input.apiName,
+        display_name: input.displayName,
+        value_type: { kind: "scalar", value_type: { scalar: scalarType(input.type), list: input.type === "List" } },
+        required: !!input.required,
+      })),
+      output: { kind: "scalar", value_type: { scalar: scalarType(ontologyFunction.output), list: ontologyFunction.output === "List" } },
+      implementation: ontologyFunction.implementation === "external_grpc"
+        ? { kind: "external_grpc", endpoint: ontologyFunction.endpoint, method: ontologyFunction.method }
+        : ontologyFunction.implementation === "wasm"
+          ? { kind: "wasm", artifact_uri: ontologyFunction.artifactUri, entrypoint: ontologyFunction.entrypoint }
+          : { kind: "expression", expression: ontologyFunction.expression },
+      read_only: true,
+    })),
   };
 }
 
@@ -365,6 +385,16 @@ export async function publishOntologyCatalog(ontology: Pick<BackendOntology, "id
     expectedRevision: current.revision,
   });
   return ontologies.publish({ ontologyId: ontology.id, expectedRevision: saved.revision });
+}
+
+export async function executeOntologyFunction(ontologyVersionId: string, functionApiName: string, argumentsJson: string) {
+  const response = await functions.execute({
+    workspaceId: DEV_WORKSPACE_ID,
+    ontologyVersionId,
+    functionApiName,
+    argumentsJson,
+  });
+  return { resultJson: response.resultJson, executor: response.executor, durationMillis: Number(response.durationMillis) };
 }
 
 function mappingPlan(objectMapping: BackendObjectMapping, links: BackendLinkMapping[]) {

@@ -4,6 +4,7 @@ export type OntologyProperty = {
   type: string;
   identity?: boolean;
   derived?: boolean;
+  required?: boolean;
 };
 
 export type OntologyObjectType = {
@@ -23,6 +24,21 @@ export type OntologyLinkType = {
 export type OntologyCatalog = {
   objectTypes: OntologyObjectType[];
   linkTypes: OntologyLinkType[];
+  functions: OntologyFunction[];
+};
+
+export type OntologyFunction = {
+  apiName: string;
+  displayName: string;
+  description: string;
+  inputs: OntologyProperty[];
+  output: string;
+  implementation: "expression" | "external_grpc" | "wasm";
+  expression: string;
+  endpoint: string;
+  method: string;
+  artifactUri: string;
+  entrypoint: string;
 };
 
 export const defaultOntologyCatalog: OntologyCatalog = {
@@ -49,4 +65,5 @@ export const defaultOntologyCatalog: OntologyCatalog = {
     { apiName: "owned_by", displayName: "Owned by", sourceType: "service", targetType: "team", properties: [] },
     { apiName: "depends_on", displayName: "Depends on", sourceType: "service", targetType: "service", properties: [] },
   ],
+  functions: [],
 };

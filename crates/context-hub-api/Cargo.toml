@@ -26,6 +26,7 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+wasmi.workspace = true
 
 [build-dependencies]
 prost-build = "0.14.3"
@@ -35,6 +36,7 @@ tonic-prost-build = "0.14.2"
 [dev-dependencies]
 datafusion.workspace = true
 parquet.workspace = true
+wat = "1.245.1"
 
 [lints]
 workspace = true

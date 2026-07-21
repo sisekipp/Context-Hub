@@ -18,6 +18,7 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - A unified ClickHouse schema for control-plane metadata and property-graph data.
 - Durable ClickHouse control-plane repositories for ontology drafts/versions, data-source metadata, ontology-specific mappings, and ingestion jobs, including runtime reload after restart.
 - gRPC and gRPC-Web contracts for workspaces, ontologies, data sources, ingestion, and graph queries.
+- Published, type-checked read-only Function execution through controlled expressions, allowlisted external gRPC providers, or fuel- and memory-limited WASM modules.
 - Read-only MCP tools for schema discovery and graph access.
 - A Next.js frontend with an editable React Flow ontology/link editor, revisioned ontology-bound JSON/NDJSON/CSV/Parquet object and link mappings, and a connected 2D/3D graph explorer.
 - A workspace ontology switcher: users can create multiple isolated ontologies, while data-source definitions remain reusable at workspace level and mappings remain ontology-specific.
@@ -69,6 +70,8 @@ The browser uploads selected JSON, NDJSON, CSV, and Parquet files to the backend
 The **Data sources** workspace view lists every saved source and the ontology mappings that use it. Sources can be tested and renamed there; REST and GraphQL configurations can also be edited. Deletion is allowed only when no ontology mapping references the source, and deleting an upload removes its MinIO object. See [Data source management](docs/data-source-management.md).
 
 The Explorer includes a visual graph-query builder for ontology-validated filters, property projections, sorting, bounded aggregations, and directed traversals. Selected nodes can load their one-hop neighborhood from ClickHouse without replacing the current 2D/3D graph. See [Graph query builder](docs/graph-query-builder.md).
+
+The ontology editor publishes Function definitions with typed inputs and outputs and can execute the published version from its inspector. Expressions use a fixed language rather than SQL or shell access. External providers implement the `ExternalFunctionService` envelope and must be included in `FUNCTION_GRPC_ALLOWLIST`; WASM artifacts are read from MinIO and execute without WASI or host imports. See [Function execution](docs/function-execution.md).
 
 The browser import action now executes the complete backend sequence: publish the selected ontology, save its source-specific mapping, start DataFusion ingestion, poll the durable job, and open the local graph preview after success. Ontologies, versions, source metadata, mappings, job results, and graph data survive restarts. Workspace upload sources are listed from ClickHouse after a browser refresh; selecting one checksum-validates and restores its original MinIO object into the mapping assistant. The explorer reloads the active-version graph through `GraphService` in 2,000-object keyset pages. Users can incrementally merge additional pages into the current 2D/3D view without reloading already completed query branches.
 

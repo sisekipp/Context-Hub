@@ -17,7 +17,7 @@ const ontologyRegistryKey = "context-hub.ontology-registry";
 const defaultOntology: OntologyWorkspace = { id: "service-map", name: "Service map", slug: "service_map", activeVersionId: "" };
 const defaultRegistry = { ontologies: [defaultOntology], activeOntologyId: defaultOntology.id };
 const defaultRegistrySnapshot = JSON.stringify(defaultRegistry);
-const emptyOntologyCatalog: OntologyCatalog = { objectTypes: [], linkTypes: [] };
+const emptyOntologyCatalog: OntologyCatalog = { objectTypes: [], linkTypes: [], functions: [] };
 const registryListeners = new Set<() => void>();
 let registryCache = defaultRegistrySnapshot;
 
@@ -151,6 +151,10 @@ export default function Home() {
     saveRegistry({ ontologies: ontologies.map((ontology) => ontology.id === activeOntology.id ? { ...ontology, name } : ontology), activeOntologyId });
   }
 
+  function recordPublishedVersion(versionId: string) {
+    saveRegistry({ ontologies: ontologies.map((ontology) => ontology.id === activeOntology.id ? { ...ontology, activeVersionId: versionId } : ontology), activeOntologyId });
+  }
+
   function registerDataSource(source: BrowserDataSource) {
     setDataSources((items) => [...items.filter((item) => item.id !== source.id), source]);
     setActiveDataSourceId(source.id);
@@ -235,7 +239,7 @@ export default function Home() {
         <div className="sidebar-footer"><span className="eyebrow">Active ontology</span><strong>{activeOntology.name}</strong><span>{activeOntology.slug} · isolated graph</span></div>
       </aside>
       <section className="main-stage">
-        <div className={section === "ontology" ? "section-pane active" : "section-pane"}><OntologyEditor key={activeOntology.id} ontologyId={activeOntology.id} ontologyName={activeOntology.name} seedTemplate={activeOntology.slug === defaultOntology.slug} onRename={renameOntology} onCatalogChange={updateActiveCatalog} /></div>
+        <div className={section === "ontology" ? "section-pane active" : "section-pane"}><OntologyEditor key={activeOntology.id} ontologyId={activeOntology.id} ontologyName={activeOntology.name} ontologySlug={activeOntology.slug} seedTemplate={activeOntology.slug === defaultOntology.slug} onRename={renameOntology} onCatalogChange={updateActiveCatalog} onPublished={recordPublishedVersion} /></div>
         {section === "sources" && <DataSourceManager
           sources={backendDataSources}
           onChanged={refreshDataSources}

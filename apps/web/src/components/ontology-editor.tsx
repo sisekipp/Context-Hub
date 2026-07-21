@@ -6,9 +6,10 @@ import {
   useEdgesState, useNodesState, type Connection, type Edge, type Node, type NodeProps,
 } from "@xyflow/react";
 import { Braces, Check, CircleDot, Code2, Component, GitFork, Link2, Plus, Save, Send, Share2, Trash2 } from "lucide-react";
+import { executeOntologyFunction, publishOntologyCatalog } from "@/lib/context-hub-client";
 import type { OntologyCatalog } from "@/lib/ontology-catalog";
 
-type Property = { name: string; type: string; identity?: boolean; shared?: boolean; derived?: boolean; expression?: string };
+type Property = { name: string; type: string; identity?: boolean; shared?: boolean; derived?: boolean; expression?: string; required?: boolean };
 type NodeKind = "object" | "interface" | "value_type" | "struct" | "shared_property" | "function";
 type OntologyNodeData = {
   [key: string]: unknown;
@@ -19,6 +20,11 @@ type OntologyNodeData = {
   properties: Property[];
   functionOutput?: string;
   implementation?: string;
+  functionExpression?: string;
+  endpoint?: string;
+  method?: string;
+  artifactUri?: string;
+  entrypoint?: string;
 };
 type LinkData = {
   [key: string]: unknown;
@@ -79,14 +85,14 @@ function OntologyCard({ data, selected }: NodeProps<OntologyNode>) {
   </div>;
 }
 
-type OntologyEditorProps = { ontologyId: string; ontologyName: string; seedTemplate: boolean; onRename: (name: string) => void; onCatalogChange?: (catalog: OntologyCatalog) => void };
+type OntologyEditorProps = { ontologyId: string; ontologyName: string; ontologySlug?: string; seedTemplate: boolean; onRename: (name: string) => void; onCatalogChange?: (catalog: OntologyCatalog) => void; onPublished?: (versionId: string) => void };
 
 export function OntologyEditor(props: OntologyEditorProps) {
   const hydrated = useSyncExternalStore(subscribeToHydration, getClientHydrationSnapshot, getServerHydrationSnapshot);
   return hydrated ? <HydratedOntologyEditor {...props}/> : <div className="workspace-view" aria-label="Loading ontology editor"/>;
 }
 
-function HydratedOntologyEditor({ ontologyId, ontologyName, seedTemplate, onRename, onCatalogChange }: OntologyEditorProps) {
+function HydratedOntologyEditor({ ontologyId, ontologyName, ontologySlug = ontologyId, seedTemplate, onRename, onCatalogChange, onPublished }: OntologyEditorProps) {
   const document = useMemo(() => initialDocument(ontologyId, seedTemplate), [ontologyId, seedTemplate]);
   const [nodes, setNodes, onNodesChange] = useNodesState<OntologyNode>(document.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<OntologyEdge>(document.edges);
@@ -94,21 +100,18 @@ function HydratedOntologyEditor({ ontologyId, ontologyName, seedTemplate, onRena
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [saveState, setSaveState] = useState("Autosave on");
   const [notice, setNotice] = useState<string | null>(null);
+  const [publishedVersionId, setPublishedVersionId] = useState("");
+  const [functionArguments, setFunctionArguments] = useState("{}");
+  const [functionResult, setFunctionResult] = useState("");
+  const [functionBusy, setFunctionBusy] = useState(false);
   const nodeTypes = useMemo(() => ({ ontology: OntologyCard }), []);
   const selected = nodes.find((node) => node.id === selectedId);
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId);
 
-  const connect = useCallback((connection: Connection) => {
-    const number = edges.length + 1;
-    const data: LinkData = { apiName: `link_${number}`, displayName: `Link ${number}`, description: "", sourceCardinality: "many", targetCardinality: "many", properties: [] };
-    const edge: OntologyEdge = { ...connection, id: crypto.randomUUID(), type: "smoothstep", label: data.apiName, data };
-    setEdges((items) => addEdge(edge, items)); setSelectedId(""); setSelectedEdgeId(edge.id);
-  }, [edges.length, setEdges]);
-
-  useEffect(() => {
+  const catalog = useMemo<OntologyCatalog>(() => {
     const objectNodes = nodes.filter((node) => node.data.kind === "object");
     const objectNodeIds = new Set(objectNodes.map((node) => node.id));
-    onCatalogChange?.({
+    return {
       objectTypes: objectNodes.map((node) => ({
         apiName: node.data.apiName,
         displayName: node.data.displayName,
@@ -121,22 +124,48 @@ function HydratedOntologyEditor({ ontologyId, ontologyName, seedTemplate, onRena
         targetType: nodes.find((node) => node.id === edge.target)!.data.apiName,
         properties: edge.data!.properties.map((property) => ({ apiName: property.name, displayName: property.name, type: property.type })),
       })),
-    });
+      functions: nodes.filter((node) => node.data.kind === "function").map((node) => ({
+        apiName: node.data.apiName,
+        displayName: node.data.displayName,
+        description: node.data.description,
+        inputs: node.data.properties.map((input) => ({ apiName: input.name, displayName: input.name, type: input.type, required: input.required })),
+        output: node.data.functionOutput ?? "String",
+        implementation: (node.data.implementation ?? "expression") as "expression" | "external_grpc" | "wasm",
+        expression: node.data.functionExpression ?? "",
+        endpoint: node.data.endpoint ?? "",
+        method: node.data.method ?? "invoke",
+        artifactUri: node.data.artifactUri ?? "",
+        entrypoint: node.data.entrypoint ?? "run",
+      })),
+    };
+  }, [edges, nodes]);
+
+  const connect = useCallback((connection: Connection) => {
+    const number = edges.length + 1;
+    const data: LinkData = { apiName: `link_${number}`, displayName: `Link ${number}`, description: "", sourceCardinality: "many", targetCardinality: "many", properties: [] };
+    const edge: OntologyEdge = { ...connection, id: crypto.randomUUID(), type: "smoothstep", label: data.apiName, data };
+    setEdges((items) => addEdge(edge, items)); setSelectedId(""); setSelectedEdgeId(edge.id); setPublishedVersionId("");
+  }, [edges.length, setEdges]);
+
+  useEffect(() => {
+    onCatalogChange?.(catalog);
     const timeout = window.setTimeout(() => { localStorage.setItem(`context-hub.ontology.${ontologyId}`, JSON.stringify({ nodes, edges })); setSaveState("Saved locally"); }, 500);
     return () => window.clearTimeout(timeout);
-  }, [nodes, edges, onCatalogChange, ontologyId]);
+  }, [nodes, edges, catalog, onCatalogChange, ontologyId]);
 
   function addNode(kind: NodeKind) {
     const count = nodes.filter((node) => node.data.kind === kind).length + 1;
     const id = `${kind}-${crypto.randomUUID()}`;
     const label = kindMeta[kind].label;
     const properties: Property[] = kind === "object" ? [{ name: "id", type: "String", identity: true }] : kind === "value_type" ? [{ name: "base_type", type: "String" }] : kind === "shared_property" ? [{ name: "value", type: "String", shared: true }] : [];
-    setNodes((items) => [...items, { id, type: "ontology", position: { x: 130 + count * 42, y: 100 + count * 48 }, data: { kind, displayName: `${label} ${count}`, apiName: `${kind}_${count}`, description: "", properties, ...(kind === "function" ? { functionOutput: "String", implementation: "expression" } : {}) } }]);
+    setNodes((items) => [...items, { id, type: "ontology", position: { x: 130 + count * 42, y: 100 + count * 48 }, data: { kind, displayName: `${label} ${count}`, apiName: `${kind}_${count}`, description: "", properties, ...(kind === "function" ? { functionOutput: "String", implementation: "expression", functionExpression: "concat('Hello ', name)", endpoint: "http://localhost:50061", method: "invoke", artifactUri: "object://functions/example.wasm", entrypoint: "run" } : {}) } }]);
     setSelectedEdgeId(null); setSelectedId(id);
+    setPublishedVersionId("");
   }
 
-  function updateSelected(field: "displayName" | "apiName" | "description" | "functionOutput" | "implementation", value: string) {
+  function updateSelected(field: "displayName" | "apiName" | "description" | "functionOutput" | "implementation" | "functionExpression" | "endpoint" | "method" | "artifactUri" | "entrypoint", value: string) {
     setNodes((items) => items.map((node) => node.id === selectedId ? { ...node, data: { ...node.data, [field]: value } } : node));
+    setPublishedVersionId("");
   }
 
   function addProperty() {
@@ -144,14 +173,17 @@ function HydratedOntologyEditor({ ontologyId, ontologyName, seedTemplate, onRena
     const number = selected.data.properties.length + 1;
     const property: Property = { name: `property_${number}`, type: "String", ...(selected.data.kind === "shared_property" ? { shared: true } : {}) };
     setNodes((items) => items.map((node) => node.id === selected.id ? { ...node, data: { ...node.data, properties: [...node.data.properties, property] } } : node));
+    setPublishedVersionId("");
   }
 
   function updateProperty(index: number, patch: Partial<Property>) {
     setNodes((items) => items.map((node) => node.id === selectedId ? { ...node, data: { ...node.data, properties: node.data.properties.map((property, propertyIndex) => propertyIndex === index ? { ...property, ...patch } : property) } } : node));
+    setPublishedVersionId("");
   }
 
   function updateLink(patch: Partial<LinkData>) {
     setEdges((items) => items.map((edge) => edge.id === selectedEdgeId ? { ...edge, label: patch.apiName ?? edge.data?.apiName, data: { ...(edge.data as LinkData), ...patch } } : edge));
+    setPublishedVersionId("");
   }
 
   function addLinkProperty() {
@@ -159,19 +191,53 @@ function HydratedOntologyEditor({ ontologyId, ontologyName, seedTemplate, onRena
     updateLink({ properties: [...selectedEdge.data.properties, { name: `property_${selectedEdge.data.properties.length + 1}`, type: "String" }] });
   }
 
-  function validateAndPublish() {
+  function validationError() {
     const invalidNode = nodes.find((node) => !/^[a-z][a-z0-9_]{0,63}$/.test(node.data.apiName));
     const invalidLink = edges.find((edge) => !edge.data || !/^[a-z][a-z0-9_]{0,63}$/.test(edge.data.apiName));
     const missingIdentity = nodes.find((node) => node.data.kind === "object" && !node.data.properties.some((property) => property.identity));
-    setNotice(invalidNode ? `Invalid API name: ${invalidNode.data.apiName}` : invalidLink ? "A link needs a valid API name" : missingIdentity ? `${missingIdentity.data.displayName} needs an identity property` : "The ontology draft is valid. Functions are read-only; Actions are not part of this version.");
+    const incompleteFunction = nodes.find((node) => node.data.kind === "function" && (!node.data.functionOutput || (node.data.implementation === "expression" && !node.data.functionExpression?.trim()) || (node.data.implementation === "external_grpc" && (!node.data.endpoint?.trim() || !node.data.method?.trim())) || (node.data.implementation === "wasm" && (!node.data.artifactUri?.trim() || !node.data.entrypoint?.trim()))));
+    return invalidNode ? `Invalid API name: ${invalidNode.data.apiName}` : invalidLink ? "A link needs a valid API name" : missingIdentity ? `${missingIdentity.data.displayName} needs an identity property` : incompleteFunction ? `${incompleteFunction.data.displayName} has an incomplete implementation` : null;
   }
 
-  return <div className="workspace-view"><header className="stage-header"><div><span className="eyebrow">Ontology editor · isolated model</span><input className="ontology-name-input" aria-label="Ontology name" value={ontologyName} onChange={(event) => onRename(event.target.value)}/><p>Object types, links, interfaces, reusable types and read-only functions.</p></div><div className="header-actions"><span className="save-state"><Save size={13}/> {saveState}</span><button className="button secondary" onClick={validateAndPublish}><Check size={15}/> Validate</button><button className="button primary" onClick={validateAndPublish}><Send size={15}/> Publish</button></div></header>
+  function validateDraft() {
+    setNotice(validationError() ?? "The ontology draft is valid. Functions are read-only; Actions are not part of this version.");
+  }
+
+  async function publishDraft() {
+    const error = validationError();
+    if (error) { setNotice(error); return; }
+    setSaveState("Publishing…");
+    try {
+      const version = await publishOntologyCatalog({ id: ontologyId, name: ontologyName, slug: ontologySlug }, catalog);
+      setPublishedVersionId(version.id);
+      onPublished?.(version.id);
+      setSaveState(`Published v${version.version}`);
+      setNotice(`Published ontology version ${version.version}. Functions can now be executed.`);
+    } catch (error) {
+      setSaveState("Publish failed");
+      setNotice(error instanceof Error ? error.message : "The ontology could not be published.");
+    }
+  }
+
+  async function runFunction() {
+    if (!selected || selected.data.kind !== "function" || !publishedVersionId) return;
+    setFunctionBusy(true); setFunctionResult("");
+    try {
+      JSON.parse(functionArguments);
+      const result = await executeOntologyFunction(publishedVersionId, selected.data.apiName, functionArguments);
+      setFunctionResult(`${result.resultJson}\n\n${result.executor} · ${result.durationMillis} ms`);
+    } catch (error) {
+      setFunctionResult(error instanceof Error ? error.message : "Function execution failed.");
+    } finally { setFunctionBusy(false); }
+  }
+
+  return <div className="workspace-view"><header className="stage-header"><div><span className="eyebrow">Ontology editor · isolated model</span><input className="ontology-name-input" aria-label="Ontology name" value={ontologyName} onChange={(event) => onRename(event.target.value)}/><p>Object types, links, interfaces, reusable types and read-only functions.</p></div><div className="header-actions"><span className="save-state"><Save size={13}/> {saveState}</span><button className="button secondary" onClick={validateDraft}><Check size={15}/> Validate</button><button className="button primary" onClick={() => void publishDraft()}><Send size={15}/> Publish</button></div></header>
     {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
     <div className="editor-layout"><div className="canvas-panel"><div className="canvas-toolbar">{(["object", "interface", "value_type", "struct", "shared_property", "function"] as NodeKind[]).map((kind) => <button key={kind} onClick={() => addNode(kind)}><Plus size={14}/> {kindMeta[kind].label}</button>)}</div>
       <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={connect} onNodeClick={(_, node) => { setSelectedId(node.id); setSelectedEdgeId(null); }} onEdgeClick={(_, edge) => { setSelectedId(""); setSelectedEdgeId(edge.id); }} fitView><Background variant={BackgroundVariant.Dots} gap={18} size={1}/><MiniMap pannable zoomable/><Controls/></ReactFlow></div>
-      <aside className="inspector"><span className="eyebrow">Inspector</span>{selected ? <><h2>{kindMeta[selected.data.kind].label}</h2><label>Display name<input value={selected.data.displayName} onChange={(event) => updateSelected("displayName", event.target.value)}/></label><label>API name<input value={selected.data.apiName} onChange={(event) => updateSelected("apiName", event.target.value)}/><small>Stable after first publish</small></label><label>Description<textarea value={selected.data.description} onChange={(event) => updateSelected("description", event.target.value)}/></label>{selected.data.kind === "function" && <><label>Output type<input value={selected.data.functionOutput} onChange={(event) => updateSelected("functionOutput", event.target.value)}/></label><label>Implementation<select value={selected.data.implementation} onChange={(event) => updateSelected("implementation", event.target.value)}><option value="expression">Expression</option><option value="external_grpc">External gRPC</option><option value="wasm">WASM</option></select><small>Functions are read-only in V1.</small></label></>}
-        <div className="inspector-section"><div className="section-title"><span>{selected.data.kind === "function" ? "Inputs" : selected.data.kind === "struct" ? "Fields" : "Properties"}</span><button onClick={addProperty}><Plus size={13}/> Add</button></div>{selected.data.properties.map((property, index) => <div className="property-edit" key={`${property.name}-${index}`}><input value={property.name} onChange={(event) => updateProperty(index, { name: event.target.value })}/><select value={property.type} onChange={(event) => updateProperty(index, { type: event.target.value })}>{["String", "Boolean", "Int64", "Float64", "Decimal", "Date", "Timestamp", "UUID", "Enum", "JSON", "List", "ValueType", "Struct"].map((type) => <option key={type}>{type}</option>)}</select>{selected.data.kind === "object" && <div className="property-flags"><label><input type="checkbox" checked={!!property.identity} onChange={(event) => updateProperty(index, { identity: event.target.checked })}/> Identity</label><label><input type="checkbox" checked={!!property.shared} onChange={(event) => updateProperty(index, { shared: event.target.checked })}/> Shared</label><label><input type="checkbox" checked={!!property.derived} onChange={(event) => updateProperty(index, { derived: event.target.checked })}/> Derived</label></div>}{property.derived && <input placeholder="Controlled expression" value={property.expression ?? ""} onChange={(event) => updateProperty(index, { expression: event.target.value })}/>}</div>)}</div>
+      <aside className="inspector"><span className="eyebrow">Inspector</span>{selected ? <><h2>{kindMeta[selected.data.kind].label}</h2><label>Display name<input value={selected.data.displayName} onChange={(event) => updateSelected("displayName", event.target.value)}/></label><label>API name<input value={selected.data.apiName} onChange={(event) => updateSelected("apiName", event.target.value)}/><small>Stable after first publish</small></label><label>Description<textarea value={selected.data.description} onChange={(event) => updateSelected("description", event.target.value)}/></label>{selected.data.kind === "function" && <><label>Output type<select value={selected.data.functionOutput} onChange={(event) => updateSelected("functionOutput", event.target.value)}>{["String", "Boolean", "Int64", "Float64", "Decimal", "Date", "Timestamp", "UUID", "JSON", "List"].map((type) => <option key={type}>{type}</option>)}</select></label><label>Implementation<select value={selected.data.implementation} onChange={(event) => updateSelected("implementation", event.target.value)}><option value="expression">Expression</option><option value="external_grpc">External gRPC</option><option value="wasm">WASM</option></select><small>Functions are read-only in V1.</small></label>{selected.data.implementation === "expression" && <label>Controlled expression<textarea aria-label="Controlled expression" value={selected.data.functionExpression ?? ""} onChange={(event) => updateSelected("functionExpression", event.target.value)}/><small>Arguments, arithmetic, comparisons, concat, coalesce, lower, upper, trim and length.</small></label>}{selected.data.implementation === "external_grpc" && <><label>gRPC endpoint<input value={selected.data.endpoint ?? ""} onChange={(event) => updateSelected("endpoint", event.target.value)}/></label><label>Method<input value={selected.data.method ?? "invoke"} onChange={(event) => updateSelected("method", event.target.value)}/><small>Uses the typed ContextHub ExternalFunctionService contract.</small></label></>}{selected.data.implementation === "wasm" && <><label>Artifact URI<input value={selected.data.artifactUri ?? ""} onChange={(event) => updateSelected("artifactUri", event.target.value)}/><small>object:// or s3://context-hub/</small></label><label>Entrypoint<input value={selected.data.entrypoint ?? "run"} onChange={(event) => updateSelected("entrypoint", event.target.value)}/></label></>}</>}
+        <div className="inspector-section"><div className="section-title"><span>{selected.data.kind === "function" ? "Inputs" : selected.data.kind === "struct" ? "Fields" : "Properties"}</span><button onClick={addProperty}><Plus size={13}/> Add</button></div>{selected.data.properties.map((property, index) => <div className="property-edit" key={`${property.name}-${index}`}><input value={property.name} onChange={(event) => updateProperty(index, { name: event.target.value })}/><select value={property.type} onChange={(event) => updateProperty(index, { type: event.target.value })}>{["String", "Boolean", "Int64", "Float64", "Decimal", "Date", "Timestamp", "UUID", "Enum", "JSON", "List", "ValueType", "Struct"].map((type) => <option key={type}>{type}</option>)}</select>{selected.data.kind === "object" && <div className="property-flags"><label><input type="checkbox" checked={!!property.identity} onChange={(event) => updateProperty(index, { identity: event.target.checked })}/> Identity</label><label><input type="checkbox" checked={!!property.shared} onChange={(event) => updateProperty(index, { shared: event.target.checked })}/> Shared</label><label><input type="checkbox" checked={!!property.derived} onChange={(event) => updateProperty(index, { derived: event.target.checked })}/> Derived</label></div>}{selected.data.kind === "function" && <div className="property-flags"><label><input type="checkbox" checked={!!property.required} onChange={(event) => updateProperty(index, { required: event.target.checked })}/> Required</label></div>}{property.derived && <input placeholder="Controlled expression" value={property.expression ?? ""} onChange={(event) => updateProperty(index, { expression: event.target.value })}/>}</div>)}</div>
+        {selected.data.kind === "function" && <div className="inspector-section function-runner"><div className="section-title"><span>Test function</span></div><label>Arguments JSON<textarea aria-label="Function arguments JSON" value={functionArguments} onChange={(event) => setFunctionArguments(event.target.value)}/></label><button className="button primary" disabled={!publishedVersionId || functionBusy} onClick={() => void runFunction()}>{functionBusy ? "Running…" : "Run published version"}</button>{!publishedVersionId && <small>Publish the current ontology before running this function.</small>}{functionResult && <pre aria-label="Function result">{functionResult}</pre>}</div>}
       </> : selectedEdge?.data ? <><h2><Link2 size={15}/> Link type</h2><label>Display name<input value={selectedEdge.data.displayName} onChange={(event) => updateLink({ displayName: event.target.value })}/></label><label>API name<input value={selectedEdge.data.apiName} onChange={(event) => updateLink({ apiName: event.target.value })}/></label><label>Description<textarea value={selectedEdge.data.description} onChange={(event) => updateLink({ description: event.target.value })}/></label><div className="cardinality-grid"><label>Source cardinality<select value={selectedEdge.data.sourceCardinality} onChange={(event) => updateLink({ sourceCardinality: event.target.value as "one" | "many" })}><option value="one">One</option><option value="many">Many</option></select></label><label>Target cardinality<select value={selectedEdge.data.targetCardinality} onChange={(event) => updateLink({ targetCardinality: event.target.value as "one" | "many" })}><option value="one">One</option><option value="many">Many</option></select></label></div><div className="inspector-section"><div className="section-title"><span>Link properties</span><button onClick={addLinkProperty}><Plus size={13}/> Add</button></div>{selectedEdge.data.properties.map((property, index) => <div className="property-edit compact" key={index}><input value={property.name} onChange={(event) => updateLink({ properties: selectedEdge.data!.properties.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })}/><select value={property.type} onChange={(event) => updateLink({ properties: selectedEdge.data!.properties.map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value } : item) })}><option>String</option><option>Boolean</option><option>Int64</option><option>Date</option><option>Timestamp</option><option>JSON</option></select></div>)}</div><button className="button danger full" onClick={() => { setEdges((items) => items.filter((edge) => edge.id !== selectedEdge.id)); setSelectedEdgeId(null); }}><Trash2 size={14}/> Delete link</button></> : <p>Select a node or a link to inspect it.</p>}</aside>
     </div>
   </div>;

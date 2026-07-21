@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@xyflow/react", async () => {
   const React = await import("react");
@@ -15,6 +15,8 @@ vi.mock("@xyflow/react", async () => {
 import { OntologyEditor } from "./ontology-editor";
 
 describe("OntologyEditor", () => {
+  beforeEach(() => localStorage.clear());
+
   it("renders the seeded ontology workflow", () => {
     render(<OntologyEditor ontologyId="service-map" ontologyName="Service map" seedTemplate onRename={vi.fn()} />);
     expect(screen.getByRole("textbox", { name: "Ontology name" })).toHaveValue("Service map");
@@ -25,5 +27,19 @@ describe("OntologyEditor", () => {
     render(<OntologyEditor ontologyId="new-ontology" ontologyName="New ontology" seedTemplate={false} onRename={vi.fn()} />);
     expect(screen.queryByText("Service")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Object type/ })).toBeInTheDocument();
+  });
+
+  it("edits controlled function implementations and explains the publish boundary", () => {
+    localStorage.setItem("context-hub.ontology.functions", JSON.stringify({
+      nodes: [{ id: "greeting", type: "ontology", position: { x: 0, y: 0 }, data: {
+        kind: "function", displayName: "Greeting", apiName: "greeting", description: "",
+        properties: [{ name: "name", type: "String", required: true }], functionOutput: "String",
+        implementation: "expression", functionExpression: "concat('Hello ', name)",
+      } }], edges: [],
+    }));
+    render(<OntologyEditor ontologyId="functions" ontologyName="Functions" seedTemplate={false} onRename={vi.fn()} />);
+    expect(screen.getByRole("textbox", { name: "Controlled expression" })).toHaveValue("concat('Hello ', name)");
+    expect(screen.getByRole("button", { name: "Run published version" })).toBeDisabled();
+    expect(screen.getByText(/Publish the current ontology/)).toBeInTheDocument();
   });
 });

@@ -108,6 +108,9 @@ button { color: inherit; }
 .property-flags label { flex-direction: row; align-items: center; gap: 4px; margin: 0; font-size: 9px; }
 .property-flags input { width: auto; }
 .property-edit > input:last-child { grid-column: 1 / -1; }
+.function-runner .button { width: 100%; justify-content: center; }
+.function-runner > small { display: block; margin-top: 8px; color: var(--muted); font-size: 9px; }
+.function-runner pre { max-height: 180px; margin: 10px 0 0; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 7px; color: #b9f0df; background: #0a1018; font-size: 10px; white-space: pre-wrap; word-break: break-word; }
 .cardinality-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .button.danger { margin-top: 18px; border-color: #6b3341; color: #ffb2c4; background: #311720; }
 

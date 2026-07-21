@@ -10,19 +10,20 @@ use chrono::{DateTime, NaiveDate, Utc};
 use context_hub_api::context_hub::v1::GraphFilter as ApiGraphFilter;
 use context_hub_api::context_hub::v1::{
     CreateOntologyRequest, DataSource, DataSourceUsage, DeleteDataSourceRequest,
-    ExpandGraphRequest, GetDataSourceUsageRequest, GetDataSourceUsageResponse,
-    GetIngestionJobRequest, GetObjectRequest, GetOntologyDraftRequest, GetUploadDataSourceRequest,
-    GetUploadDataSourceResponse, GetWorkspaceRequest, GraphAggregationResult, GraphEdge, GraphNode,
-    GraphQuery, ImportGraphRequest, IngestionJob, IngestionState, ListDataSourcesRequest,
-    ListDataSourcesResponse, ListOntologiesRequest, ListOntologiesResponse,
-    ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse, ListOntologyVersionsRequest,
-    ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology, OntologyDataMapping,
-    OntologyDraft, OntologyVersion, PreviewDataSourceRequest, PreviewDataSourceResponse,
-    PublishOntologyRequest, QueryGraphResponse, SaveDataSourceRequest,
+    ExecuteFunctionRequest, ExecuteFunctionResponse, ExpandGraphRequest, GetDataSourceUsageRequest,
+    GetDataSourceUsageResponse, GetIngestionJobRequest, GetObjectRequest, GetOntologyDraftRequest,
+    GetUploadDataSourceRequest, GetUploadDataSourceResponse, GetWorkspaceRequest,
+    GraphAggregationResult, GraphEdge, GraphNode, GraphQuery, ImportGraphRequest, IngestionJob,
+    IngestionState, ListDataSourcesRequest, ListDataSourcesResponse, ListOntologiesRequest,
+    ListOntologiesResponse, ListOntologyDataMappingsRequest, ListOntologyDataMappingsResponse,
+    ListOntologyVersionsRequest, ListOntologyVersionsResponse, ListWorkspacesResponse, Ontology,
+    OntologyDataMapping, OntologyDraft, OntologyVersion, PreviewDataSourceRequest,
+    PreviewDataSourceResponse, PublishOntologyRequest, QueryGraphResponse, SaveDataSourceRequest,
     SaveOntologyDataMappingRequest, SaveOntologyDraftRequest, StartIngestionRequest,
     UploadDataSourceRequest, UploadDataSourceResponse, ValidateOntologyRequest,
     ValidateOntologyResponse, ValidationIssue, Workspace,
     data_source_service_server::{DataSourceService, DataSourceServiceServer},
+    function_service_server::{FunctionService, FunctionServiceServer},
     graph_service_server::{GraphService, GraphServiceServer},
     ingestion_service_server::{IngestionService, IngestionServiceServer},
     ontology_service_server::{OntologyService, OntologyServiceServer},
@@ -31,7 +32,10 @@ use context_hub_api::context_hub::v1::{
 #[cfg(test)]
 use context_hub_api::context_hub::v1::{GraphAggregation, GraphSort};
 #[cfg(test)]
-use context_hub_domain::{Cardinality, LinkTypeDefinition};
+use context_hub_domain::{
+    Cardinality, FunctionDefinition, FunctionImplementation, FunctionParameterDefinition,
+    LinkTypeDefinition, TypeReference,
+};
 use context_hub_domain::{
     ObjectTypeDefinition, OntologyDefinition, PropertyDefinition, ScalarType, ValueType,
 };
@@ -60,6 +64,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod function_runtime;
 mod graphql_connector;
 mod rest_connector;
 
@@ -692,6 +697,53 @@ impl WorkspaceService for Runtime {
     ) -> Result<Response<ListWorkspacesResponse>, Status> {
         Ok(Response::new(ListWorkspacesResponse {
             workspaces: vec![dev_workspace()],
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl FunctionService for Runtime {
+    async fn execute(
+        &self,
+        request: Request<ExecuteFunctionRequest>,
+    ) -> Result<Response<ExecuteFunctionResponse>, Status> {
+        let request = request.into_inner();
+        if request.arguments_json.len() > 1024 * 1024 {
+            return Err(Status::invalid_argument("function arguments exceed 1 MiB"));
+        }
+        let version = self
+            .ontology_version(&request.workspace_id, &request.ontology_version_id)
+            .await?;
+        let definition: OntologyDefinition = serde_json::from_str(&version.definition_json)
+            .map_err(|error| {
+                Status::internal(format!("stored ontology version is invalid: {error}"))
+            })?;
+        let function = definition
+            .functions
+            .iter()
+            .find(|function| function.api_name == request.function_api_name)
+            .ok_or_else(|| Status::not_found("function does not exist in the ontology version"))?;
+        if !function.read_only {
+            return Err(Status::failed_precondition(
+                "only read-only functions can be executed",
+            ));
+        }
+        let arguments = serde_json::from_str(&request.arguments_json).map_err(|error| {
+            Status::invalid_argument(format!("arguments_json is invalid: {error}"))
+        })?;
+        let started = std::time::Instant::now();
+        let (result, executor) = function_runtime::execute(
+            &definition,
+            function,
+            arguments,
+            Arc::clone(&self.source_store),
+        )
+        .await
+        .map_err(Status::invalid_argument)?;
+        Ok(Response::new(ExecuteFunctionResponse {
+            result_json: result.to_string(),
+            executor: executor.into(),
+            duration_millis: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         }))
     }
 }
@@ -2792,6 +2844,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(tonic_web::GrpcWebLayer::new())
         .add_service(WorkspaceServiceServer::new(runtime.clone()))
         .add_service(OntologyServiceServer::new(runtime.clone()))
+        .add_service(FunctionServiceServer::new(runtime.clone()))
         .add_service(
             DataSourceServiceServer::new(runtime.clone())
                 .max_decoding_message_size(34 * 1024 * 1024)
@@ -2816,6 +2869,77 @@ mod tests {
         record_batch::RecordBatch,
     };
     use parquet::arrow::ArrowWriter;
+
+    #[tokio::test]
+    async fn executes_a_published_typed_expression_function() {
+        let runtime = Runtime::seeded().await;
+        let ontology_id = runtime
+            .ontologies
+            .read()
+            .await
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let expected_revision = {
+            let mut drafts = runtime.drafts.write().await;
+            let draft = drafts.get_mut(&ontology_id).unwrap();
+            let mut definition: OntologyDefinition =
+                serde_json::from_str(&draft.definition_json).unwrap();
+            definition.functions.push(FunctionDefinition {
+                api_name: "greeting".into(),
+                display_name: "Greeting".into(),
+                description: None,
+                inputs: vec![FunctionParameterDefinition {
+                    api_name: "name".into(),
+                    display_name: "Name".into(),
+                    value_type: TypeReference::Scalar {
+                        value_type: ValueType {
+                            scalar: ScalarType::String,
+                            list: false,
+                        },
+                    },
+                    required: true,
+                }],
+                output: TypeReference::Scalar {
+                    value_type: ValueType {
+                        scalar: ScalarType::String,
+                        list: false,
+                    },
+                },
+                implementation: FunctionImplementation::Expression {
+                    expression: "concat('Hello ', trim(name))".into(),
+                },
+                read_only: true,
+            });
+            draft.definition_json = serde_json::to_string(&definition).unwrap();
+            draft.revision
+        };
+        let version = OntologyService::publish(
+            &runtime,
+            Request::new(PublishOntologyRequest {
+                ontology_id,
+                expected_revision,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        let response = FunctionService::execute(
+            &runtime,
+            Request::new(ExecuteFunctionRequest {
+                workspace_id: dev_workspace_id(),
+                ontology_version_id: version.id,
+                function_api_name: "greeting".into(),
+                arguments_json: r#"{"name":" ContextHub "}"#.into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.result_json, r#""Hello ContextHub""#);
+        assert_eq!(response.executor, "expression");
+    }
 
     #[tokio::test]
     async fn derives_typed_property_indexes_from_the_ontology() {
