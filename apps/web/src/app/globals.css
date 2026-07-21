@@ -102,16 +102,21 @@ button { color: inherit; }
 .section-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .section-title h2 { margin: 3px 0 0; font-size: 16px; }
 .property-row, .detail-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #202b3d; font-size: 11px; }
-.property-edit { display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 6px; padding: 7px 0; border-bottom: 1px solid #202b3d; }
-.property-edit.compact { grid-template-columns: minmax(0, 1fr) 85px; }
+.property-edit { display: grid; grid-template-columns: minmax(0, 1fr) 88px 26px; gap: 6px; padding: 7px 0; border-bottom: 1px solid #202b3d; }
+.property-edit.compact { grid-template-columns: minmax(0, 1fr) 85px 26px; }
+.property-delete { display: grid; place-items: center; width: 26px; height: 32px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
+.property-delete:hover { color: #ff9db3; background: #301822; }
+.property-reference, .property-description { grid-column: 1 / -1; }
 .property-flags { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
 .property-flags label { flex-direction: row; align-items: center; gap: 4px; margin: 0; font-size: 9px; }
 .property-flags input { width: auto; }
-.property-edit > input:last-child { grid-column: 1 / -1; }
+.property-edit > input:last-child:not(:first-child) { grid-column: 1 / -1; }
 .function-runner .button { width: 100%; justify-content: center; }
 .function-runner > small { display: block; margin-top: 8px; color: var(--muted); font-size: 9px; }
 .function-runner pre { max-height: 180px; margin: 10px 0 0; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 7px; color: #b9f0df; background: #0a1018; font-size: 10px; white-space: pre-wrap; word-break: break-word; }
 .cardinality-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.inline-checkbox { flex-direction: row !important; align-items: center; gap: 7px; }
+.inline-checkbox input { width: auto; }
 .button.danger { margin-top: 18px; border-color: #6b3341; color: #ffb2c4; background: #311720; }
 
 .mapping-view { overflow-y: auto; padding-bottom: 40px; background: #0b0f17; }

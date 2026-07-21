@@ -844,16 +844,15 @@ impl OntologyService for Runtime {
         let mut incoming = request
             .draft
             .ok_or_else(|| Status::invalid_argument("draft is required"))?;
-        let definition: OntologyDefinition = serde_json::from_str(&incoming.definition_json)
+        let _: OntologyDefinition = serde_json::from_str(&incoming.definition_json)
             .map_err(|error| Status::invalid_argument(format!("invalid definition: {error}")))?;
-        let issues = definition.validate();
-        if !issues.is_empty() {
-            return Err(Status::invalid_argument(
-                serde_json::to_string(&issues).unwrap_or_else(|_| "ontology is invalid".into()),
-            ));
-        }
         let mut drafts = self.drafts.write().await;
         if let Some(current) = drafts.get(&incoming.id) {
+            if incoming.workspace_id != current.workspace_id {
+                return Err(Status::permission_denied(
+                    "ontology draft workspace cannot be changed",
+                ));
+            }
             if current.revision != request.expected_revision {
                 return Err(Status::aborted(format!(
                     "revision conflict: current revision is {}",
@@ -2869,6 +2868,39 @@ mod tests {
         record_batch::RecordBatch,
     };
     use parquet::arrow::ArrowWriter;
+
+    #[tokio::test]
+    async fn stores_invalid_work_in_progress_but_refuses_to_publish_it() {
+        let runtime = Runtime::seeded().await;
+        let mut draft = runtime.drafts.read().await.values().next().unwrap().clone();
+        let mut definition: OntologyDefinition =
+            serde_json::from_str(&draft.definition_json).unwrap();
+        definition.api_name = "Temporarily Invalid".into();
+        draft.definition_json = serde_json::to_string(&definition).unwrap();
+        let expected_revision = draft.revision;
+        let saved = OntologyService::save_draft(
+            &runtime,
+            Request::new(SaveOntologyDraftRequest {
+                draft: Some(draft.clone()),
+                expected_revision,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(saved.revision, expected_revision + 1);
+
+        let error = OntologyService::publish(
+            &runtime,
+            Request::new(PublishOntologyRequest {
+                ontology_id: draft.id,
+                expected_revision: saved.revision,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
 
     #[tokio::test]
     async fn executes_a_published_typed_expression_function() {

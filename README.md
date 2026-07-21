@@ -8,7 +8,7 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 
 - A versioned ontology domain with object and link types, interfaces, value types, structs, shared and derived properties, and read-only functions.
 - Validation for API names, identities, reusable type references, function boundaries, link targets, enums, and interface cycles.
-- Optimistic draft revisions and immutable publish versions in the gRPC service.
+- Optimistic backend draft revisions and immutable publish versions in the gRPC service. Work-in-progress drafts may be temporarily invalid; validation remains mandatory at publish time.
 - A declarative `MappingPlan` compiled into safe Apache DataFusion SQL expressions, with an ordered visual transformation pipeline per property.
 - JSON, NDJSON, CSV, and Parquet source uploads through gRPC-Web into MinIO, plus secured REST and GraphQL sources with bounded backend previews.
 - A background ingestion path that reads uploaded objects as Arrow batches, executes the ontology-specific mapping through DataFusion, and writes nodes and links to ClickHouse.
@@ -20,7 +20,7 @@ The repository is a greenfield V1 implementation inspired by the semantic model 
 - gRPC and gRPC-Web contracts for workspaces, ontologies, data sources, ingestion, and graph queries.
 - Published, type-checked read-only Function execution through controlled expressions, allowlisted external gRPC providers, or fuel- and memory-limited WASM modules.
 - Read-only MCP tools for schema discovery and graph access.
-- A Next.js frontend with an editable React Flow ontology/link editor, revisioned ontology-bound JSON/NDJSON/CSV/Parquet object and link mappings, and a connected 2D/3D graph explorer.
+- A Next.js frontend with a backend-persisted React Flow ontology editor, revisioned ontology-bound JSON/NDJSON/CSV/Parquet object and link mappings, and a connected 2D/3D graph explorer.
 - A workspace ontology switcher: users can create multiple isolated ontologies, while data-source definitions remain reusable at workspace level and mappings remain ontology-specific.
 - A Devcontainer with ClickHouse and MinIO. Local development uses `AUTH_MODE=dev`; no authentication service is started.
 
@@ -72,6 +72,8 @@ The **Data sources** workspace view lists every saved source and the ontology ma
 The Explorer includes a visual graph-query builder for ontology-validated filters, property projections, sorting, bounded aggregations, and directed traversals. Selected nodes can load their one-hop neighborhood from ClickHouse without replacing the current 2D/3D graph. See [Graph query builder](docs/graph-query-builder.md).
 
 The ontology editor publishes Function definitions with typed inputs and outputs and can execute the published version from its inspector. Expressions use a fixed language rather than SQL or shell access. External providers implement the `ExternalFunctionService` envelope and must be included in `FUNCTION_GRPC_ALLOWLIST`; WASM artifacts are read from MinIO and execute without WASI or host imports. See [Function execution](docs/function-execution.md).
+
+Ontology canvas state is stored with the definition in the revisioned ClickHouse draft. The editor reconstructs older definitions that have no compatible layout, migrates legacy browser-local drafts once, and autosaves only documents that differ from the last backend-confirmed state. Object types, links, interfaces, value types, structs, shared and derived properties, and Functions survive reloads without being flattened. Node/property deletion and bounded Undo/Redo are available before publish.
 
 The browser import action now executes the complete backend sequence: publish the selected ontology, save its source-specific mapping, start DataFusion ingestion, poll the durable job, and open the local graph preview after success. Ontologies, versions, source metadata, mappings, job results, and graph data survive restarts. Workspace upload sources are listed from ClickHouse after a browser refresh; selecting one checksum-validates and restores its original MinIO object into the mapping assistant. The explorer reloads the active-version graph through `GraphService` in 2,000-object keyset pages. Users can incrementally merge additional pages into the current 2D/3D view without reloading already completed query branches.
 

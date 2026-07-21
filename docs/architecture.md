@@ -14,6 +14,8 @@
 
 The UI uploads JSON, NDJSON, CSV, and Parquet sources through gRPC-Web into the workspace's MinIO bucket. Text formats are parsed locally for an immediate mapping preview. Parquet schema and records are decoded through Arrow on the backend and returned as a bounded JSON preview; ingestion reads the original Parquet bytes directly. The preview graph is handed to the selected ontology's 2D/3D explorer. Editor drafts, mapping drafts, and in-memory preview graphs are isolated by ontology ID.
 
+The ontology editor loads both `definition_json` and `layout_json` from `OntologyService.GetDraft`. Its React Flow document serializes the complete supported ontology catalog and saves with an expected revision; unchanged documents are not written. Legacy local-storage drafts are retained as a failure fallback and removed after their first successful backend migration. `SaveDraft` accepts temporarily invalid but structurally decodable work-in-progress definitions, while `Validate` and `Publish` run the complete domain validator and immutable-version checks.
+
 ## Multi-ontology ownership
 
 A workspace can contain many independent ontologies. Data sources belong to the workspace and can therefore be reused by every ontology in that workspace. The interpretation of a source never lives on the source itself: `ontology_data_mappings` associates one ontology with one shared data source and owns the mapping plan and its revision.

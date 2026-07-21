@@ -31,6 +31,7 @@ const graph = createClient(GraphService, transport);
 const functions = createClient(FunctionService, transport);
 
 export type BackendOntology = { id: string; name: string; slug: string; activeVersionId: string };
+export type BackendOntologyDraft = { id: string; workspaceId: string; name: string; slug: string; revision: number; definitionJson: string; layoutJson: string };
 export type BackendDataSource = { id: string; name: string; fileName: string; kind: "upload" | "rest" | "graphql"; configurationJson: string };
 export type BackendDataSourceUsage = { ontologyId: string; ontologyName: string; mappingId: string; mappingName: string };
 export type RestKeyValue = { key: string; value: string };
@@ -304,7 +305,23 @@ export async function createWorkspaceOntology(name: string, slug: string): Promi
   return { id: ontology.id, name: ontology.name, slug: ontology.slug, activeVersionId: ontology.activeVersionId };
 }
 
-function ontologyDefinition(name: string, slug: string, catalog: OntologyCatalog) {
+export function ontologyDefinition(name: string, slug: string, catalog: OntologyCatalog) {
+  const sharedNames = new Set(catalog.sharedProperties.map((property) => property.apiName));
+  const propertyDefinition = (property: OntologyCatalog["objectTypes"][number]["properties"][number]) => ({
+    api_name: property.apiName,
+    display_name: property.displayName,
+    value_type: { scalar: scalarType(property.type), list: property.type === "List" },
+    required: !!property.required || !!property.identity,
+    unique: !!property.unique || !!property.identity,
+    identity: !!property.identity,
+    indexed: !!property.indexed || !!property.identity,
+    description: property.description || null,
+  });
+  const typeReference = (type: string, reference?: string) => type === "ValueType" && reference
+    ? { kind: "value_type", api_name: reference, list: false }
+    : type === "Struct" && reference
+      ? { kind: "struct", api_name: reference, list: false }
+      : { kind: "scalar", value_type: { scalar: scalarType(type), list: type === "List" } };
   return {
     api_name: slug,
     display_name: name,
@@ -312,33 +329,53 @@ function ontologyDefinition(name: string, slug: string, catalog: OntologyCatalog
     object_types: catalog.objectTypes.map((objectType) => ({
       api_name: objectType.apiName,
       display_name: objectType.displayName,
-      description: null,
-      properties: objectType.properties.filter((property) => !property.derived).map((property) => ({
-        api_name: property.apiName,
-        display_name: property.displayName,
-        value_type: { scalar: scalarType(property.type), list: property.type === "List" },
-        required: !!property.identity,
-        unique: !!property.identity,
-        identity: !!property.identity,
-        indexed: !!property.identity,
-        description: null,
+      description: objectType.description || null,
+      properties: objectType.properties.filter((property) => !property.derived && !(property.shared && sharedNames.has(property.apiName))).map(propertyDefinition),
+      shared_properties: [...(objectType.sharedProperties ?? []), ...objectType.properties.filter((property) => property.shared && sharedNames.has(property.apiName)).map((property) => property.apiName)],
+      derived_properties: objectType.properties.filter((property) => property.derived).map((property) => ({
+        api_name: property.apiName, display_name: property.displayName,
+        value_type: typeReference(property.type, property.reference), expression: property.expression ?? "",
+        description: property.description || null,
       })),
-      shared_properties: [],
-      derived_properties: [],
-      implements: [],
+      implements: objectType.implements ?? [],
     })),
     link_types: catalog.linkTypes.map((link) => ({
       api_name: link.apiName,
       display_name: link.displayName,
       source_type: link.sourceType,
       target_type: link.targetType,
-      source_cardinality: "many",
-      target_cardinality: "many",
-      required: false,
-      properties: [],
-      description: null,
+      source_cardinality: link.sourceCardinality ?? "many",
+      target_cardinality: link.targetCardinality ?? "many",
+      required: !!link.required,
+      properties: link.properties.map(propertyDefinition),
+      description: link.description || null,
     })),
-    interfaces: [], value_types: [], struct_types: [], shared_properties: [],
+    interfaces: catalog.interfaces.map((ontologyInterface) => ({
+      api_name: ontologyInterface.apiName, display_name: ontologyInterface.displayName,
+      description: ontologyInterface.description || null,
+      properties: ontologyInterface.properties.filter((property) => !(property.shared && sharedNames.has(property.apiName))).map(propertyDefinition),
+      shared_properties: [...ontologyInterface.sharedProperties, ...ontologyInterface.properties.filter((property) => property.shared && sharedNames.has(property.apiName)).map((property) => property.apiName)],
+      extends: ontologyInterface.extends,
+    })),
+    value_types: catalog.valueTypes.map((valueType) => ({
+      api_name: valueType.apiName, display_name: valueType.displayName,
+      description: valueType.description || null, base_type: scalarType(valueType.baseType),
+      unit: null, minimum: null, maximum: null, pattern: null,
+    })),
+    struct_types: catalog.structTypes.map((structType) => ({
+      api_name: structType.apiName, display_name: structType.displayName,
+      description: structType.description || null,
+      fields: structType.fields.map((field) => ({
+        api_name: field.apiName, display_name: field.displayName,
+        value_type: typeReference(field.type, field.reference), required: !!field.required,
+        description: field.description || null,
+      })),
+    })),
+    shared_properties: catalog.sharedProperties.map((property) => ({
+      api_name: property.apiName, display_name: property.displayName,
+      value_type: typeReference(property.type, property.reference), description: property.description || null,
+      required: !!property.required, indexed: !!property.indexed,
+    })),
     functions: catalog.functions.map((ontologyFunction) => ({
       api_name: ontologyFunction.apiName,
       display_name: ontologyFunction.displayName,
@@ -346,10 +383,10 @@ function ontologyDefinition(name: string, slug: string, catalog: OntologyCatalog
       inputs: ontologyFunction.inputs.map((input) => ({
         api_name: input.apiName,
         display_name: input.displayName,
-        value_type: { kind: "scalar", value_type: { scalar: scalarType(input.type), list: input.type === "List" } },
+        value_type: typeReference(input.type, input.reference),
         required: !!input.required,
       })),
-      output: { kind: "scalar", value_type: { scalar: scalarType(ontologyFunction.output), list: ontologyFunction.output === "List" } },
+      output: typeReference(ontologyFunction.output, ontologyFunction.outputReference),
       implementation: ontologyFunction.implementation === "external_grpc"
         ? { kind: "external_grpc", endpoint: ontologyFunction.endpoint, method: ontologyFunction.method }
         : ontologyFunction.implementation === "wasm"
@@ -358,6 +395,27 @@ function ontologyDefinition(name: string, slug: string, catalog: OntologyCatalog
       read_only: true,
     })),
   };
+}
+
+export async function loadOntologyDraft(id: string): Promise<BackendOntologyDraft> {
+  const draft = await ontologies.getDraft({ id });
+  return { id: draft.id, workspaceId: draft.workspaceId, name: draft.name, slug: draft.slug, revision: Number(draft.revision), definitionJson: draft.definitionJson, layoutJson: draft.layoutJson };
+}
+
+export async function saveOntologyCatalogDraft(ontology: Pick<BackendOntology, "id" | "name" | "slug">, catalog: OntologyCatalog, layoutJson: string, expectedRevision: number) {
+  const saved = await ontologies.saveDraft({
+    draft: {
+      id: ontology.id, workspaceId: DEV_WORKSPACE_ID, name: ontology.name, slug: ontology.slug,
+      revision: BigInt(expectedRevision), definitionJson: JSON.stringify(ontologyDefinition(ontology.name, ontology.slug, catalog)),
+      layoutJson, updatedAt: undefined,
+    },
+    expectedRevision: BigInt(expectedRevision),
+  });
+  return Number(saved.revision);
+}
+
+export async function publishSavedOntologyDraft(ontologyId: string, expectedRevision: number) {
+  return ontologies.publish({ ontologyId, expectedRevision: BigInt(expectedRevision) });
 }
 
 function scalarType(type: string) {

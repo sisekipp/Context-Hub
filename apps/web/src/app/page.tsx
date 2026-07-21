@@ -17,7 +17,7 @@ const ontologyRegistryKey = "context-hub.ontology-registry";
 const defaultOntology: OntologyWorkspace = { id: "service-map", name: "Service map", slug: "service_map", activeVersionId: "" };
 const defaultRegistry = { ontologies: [defaultOntology], activeOntologyId: defaultOntology.id };
 const defaultRegistrySnapshot = JSON.stringify(defaultRegistry);
-const emptyOntologyCatalog: OntologyCatalog = { objectTypes: [], linkTypes: [], functions: [] };
+const emptyOntologyCatalog: OntologyCatalog = { objectTypes: [], linkTypes: [], interfaces: [], valueTypes: [], structTypes: [], sharedProperties: [], functions: [] };
 const registryListeners = new Set<() => void>();
 let registryCache = defaultRegistrySnapshot;
 
