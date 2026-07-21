@@ -253,7 +253,7 @@ I also used Codex to reproduce and diagnose concrete issues rather than only gen
 included Devcontainer toolchain problems, Docker disk usage, ingestion and ontology-mapping bugs,
 2D/3D interaction issues, and the final MCP-to-GraphService integration. Every change was checked
 against the running application, automated tests, or both. GPT-5.6 and Codex accelerated the
-iteration loop; the repository, its design choices, and the submitted result remain my work.
+iteration loop, the repository, its design choices, and the submitted result remain my work.
 
 ## Quick start
 
