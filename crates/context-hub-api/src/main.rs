@@ -47,8 +47,10 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod graphql_connector;
 mod rest_connector;
 
+use graphql_connector::{GraphqlSourceConfiguration, fetch_graphql_source};
 use rest_connector::{RestSourceConfiguration, fetch_rest_source};
 
 #[derive(Clone)]
@@ -512,7 +514,14 @@ impl Runtime {
                 let content = fetch_rest_source(&configuration).await?;
                 (SourceFormat::Json, content)
             }
-            3 => return Err("GraphQL ingestion is not implemented yet".into()),
+            3 => {
+                let configuration: GraphqlSourceConfiguration =
+                    serde_json::from_str(&source.configuration_json).map_err(|error| {
+                        format!("GraphQL source configuration is invalid: {error}")
+                    })?;
+                let content = fetch_graphql_source(&configuration).await?;
+                (SourceFormat::Json, content)
+            }
             _ => return Err("data source kind is not supported for ingestion".into()),
         };
         let document: MappingDocument = serde_json::from_str(&mapping.mapping_plan_json)
@@ -909,12 +918,24 @@ impl DataSourceService for Runtime {
             return Err(Status::invalid_argument("data source name is required"));
         }
         match source.kind {
-            1 | 3 => {}
+            1 => {}
             2 => {
                 let configuration: RestSourceConfiguration =
                     serde_json::from_str(&source.configuration_json).map_err(|error| {
                         Status::invalid_argument(format!(
                             "REST source configuration is invalid: {error}"
+                        ))
+                    })?;
+                configuration
+                    .validate()
+                    .await
+                    .map_err(Status::invalid_argument)?;
+            }
+            3 => {
+                let configuration: GraphqlSourceConfiguration =
+                    serde_json::from_str(&source.configuration_json).map_err(|error| {
+                        Status::invalid_argument(format!(
+                            "GraphQL source configuration is invalid: {error}"
                         ))
                     })?;
                 configuration
@@ -1047,22 +1068,36 @@ impl DataSourceService for Runtime {
         if source.workspace_id != dev_workspace_id() {
             return Err(Status::permission_denied("workspace is not accessible"));
         }
-        if source.kind != 2 {
+        if !matches!(source.kind, 2 | 3) {
             return Err(Status::failed_precondition(
-                "preview currently supports REST data sources",
+                "preview supports REST and GraphQL data sources",
             ));
         }
-        let mut configuration: RestSourceConfiguration =
-            serde_json::from_str(&source.configuration_json).map_err(|error| {
-                Status::failed_precondition(format!(
-                    "REST source configuration is invalid: {error}"
-                ))
-            })?;
-        configuration.max_bytes = configuration.max_bytes.min(MAX_REST_PREVIEW_BYTES);
-        configuration.max_pages = configuration.max_pages.min(20);
-        let content = fetch_rest_source(&configuration)
-            .await
-            .map_err(Status::failed_precondition)?;
+        let content = if source.kind == 2 {
+            let mut configuration: RestSourceConfiguration =
+                serde_json::from_str(&source.configuration_json).map_err(|error| {
+                    Status::failed_precondition(format!(
+                        "REST source configuration is invalid: {error}"
+                    ))
+                })?;
+            configuration.max_bytes = configuration.max_bytes.min(MAX_REST_PREVIEW_BYTES);
+            configuration.max_pages = configuration.max_pages.min(20);
+            fetch_rest_source(&configuration)
+                .await
+                .map_err(Status::failed_precondition)?
+        } else {
+            let mut configuration: GraphqlSourceConfiguration =
+                serde_json::from_str(&source.configuration_json).map_err(|error| {
+                    Status::failed_precondition(format!(
+                        "GraphQL source configuration is invalid: {error}"
+                    ))
+                })?;
+            configuration.max_bytes = configuration.max_bytes.min(MAX_REST_PREVIEW_BYTES);
+            configuration.max_pages = configuration.max_pages.min(20);
+            fetch_graphql_source(&configuration)
+                .await
+                .map_err(Status::failed_precondition)?
+        };
         let mut records: Vec<serde_json::Value> = serde_json::from_slice(&content)
             .map_err(|error| Status::internal(format!("REST preview is invalid: {error}")))?;
         records.truncate(MAX_REST_PREVIEW_RECORDS);

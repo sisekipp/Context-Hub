@@ -230,24 +230,7 @@ impl RestSourceConfiguration {
     }
 
     fn headers(&self) -> Result<HeaderMap, String> {
-        let mut headers = HeaderMap::new();
-        for (name, value) in &self.headers {
-            let normalized = name.to_ascii_lowercase();
-            if matches!(
-                normalized.as_str(),
-                "authorization" | "cookie" | "proxy-authorization" | "x-api-key"
-            ) {
-                return Err(format!(
-                    "sensitive REST header '{name}' requires the future credential envelope"
-                ));
-            }
-            let name = HeaderName::from_bytes(name.as_bytes())
-                .map_err(|error| format!("REST header name is invalid: {error}"))?;
-            let value = HeaderValue::from_str(value)
-                .map_err(|error| format!("REST header value is invalid: {error}"))?;
-            headers.insert(name, value);
-        }
-        Ok(headers)
+        validated_headers(&self.headers)
     }
 }
 
@@ -259,7 +242,15 @@ async fn fetch_with_retries(
 ) -> Result<Vec<u8>, String> {
     let mut last_error = String::new();
     for attempt in 0..=configuration.retry_attempts {
-        match fetch_once(configuration, url.clone(), headers, byte_limit).await {
+        match fetch_once(
+            configuration.timeout_seconds,
+            url.clone(),
+            headers,
+            byte_limit,
+            None,
+        )
+        .await
+        {
             Ok(body) => return Ok(body),
             Err(error) if error.retryable && attempt < configuration.retry_attempts => {
                 last_error = error.message;
@@ -273,21 +264,25 @@ async fn fetch_with_retries(
 }
 
 async fn fetch_once(
-    configuration: &RestSourceConfiguration,
+    timeout_seconds: u64,
     mut url: Url,
     headers: &HeaderMap,
     byte_limit: usize,
+    json_body: Option<&Value>,
 ) -> Result<Vec<u8>, FetchError> {
     for _ in 0..=MAX_REDIRECTS {
-        let client = pinned_client(&url, configuration.timeout_seconds)
+        let client = pinned_client(&url, timeout_seconds)
             .await
             .map_err(FetchError::permanent)?;
-        let response = client
-            .get(url.clone())
+        let request = json_body.map_or_else(
+            || client.get(url.clone()),
+            |body| client.post(url.clone()).json(body),
+        );
+        let response = request
             .headers(headers.clone())
             .send()
             .await
-            .map_err(|error| FetchError::retryable(format!("REST request failed: {error}")))?;
+            .map_err(|error| FetchError::retryable(format!("remote request failed: {error}")))?;
         if response.status().is_redirection() {
             let location = response
                 .headers()
@@ -347,6 +342,70 @@ async fn fetch_once(
     Err(FetchError::permanent(format!(
         "REST source exceeded the limit of {MAX_REDIRECTS} redirects"
     )))
+}
+
+pub(crate) async fn fetch_secure_json_post(
+    url: &str,
+    headers: &HashMap<String, String>,
+    body: &Value,
+    timeout_seconds: u64,
+    retry_attempts: usize,
+    byte_limit: usize,
+) -> Result<Vec<u8>, String> {
+    let url = Url::parse(url).map_err(|error| format!("source URL is invalid: {error}"))?;
+    validate_url(&url).await?;
+    let headers = validated_headers(headers)?;
+    let mut last_error = String::new();
+    for attempt in 0..=retry_attempts {
+        match fetch_once(
+            timeout_seconds,
+            url.clone(),
+            &headers,
+            byte_limit,
+            Some(body),
+        )
+        .await
+        {
+            Ok(response) => return Ok(response),
+            Err(error) if error.retryable && attempt < retry_attempts => {
+                last_error = error.message;
+                let delay = 100_u64.saturating_mul(1_u64 << attempt.min(4));
+                sleep(Duration::from_millis(delay)).await;
+            }
+            Err(error) => return Err(error.message),
+        }
+    }
+    Err(last_error)
+}
+
+pub(crate) async fn validate_secure_remote(
+    url: &str,
+    headers: &HashMap<String, String>,
+) -> Result<(), String> {
+    validated_headers(headers)?;
+    let url = Url::parse(url).map_err(|error| format!("source URL is invalid: {error}"))?;
+    validate_url(&url).await
+}
+
+fn validated_headers(values: &HashMap<String, String>) -> Result<HeaderMap, String> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in values {
+        let normalized = name.to_ascii_lowercase();
+        if matches!(
+            normalized.as_str(),
+            "authorization" | "cookie" | "proxy-authorization" | "x-api-key"
+        ) {
+            return Err(format!(
+                "sensitive header '{name}' requires the future credential envelope"
+            ));
+        }
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|error| format!("header name is invalid: {error}"))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|error| format!("header value is invalid: {error}"))?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
 }
 
 async fn pinned_client(url: &Url, timeout_seconds: u64) -> Result<Client, String> {

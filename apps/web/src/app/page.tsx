@@ -152,7 +152,7 @@ export default function Home() {
       return;
     }
     try {
-      const content = existing?.kind === "rest" ? await previewWorkspaceSource(id) : await downloadWorkspaceSource(id);
+      const content = existing?.kind === "upload" ? await downloadWorkspaceSource(id) : await previewWorkspaceSource(id);
       const hydrated: BrowserDataSource = {
         id: content.id,
         fileName: content.fileName,

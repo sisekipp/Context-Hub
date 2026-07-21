@@ -25,7 +25,7 @@ const ingestions = createClient(IngestionService, transport);
 const graph = createClient(GraphService, transport);
 
 export type BackendOntology = { id: string; name: string; slug: string; activeVersionId: string };
-export type BackendDataSource = { id: string; name: string; fileName: string; kind: "upload" | "rest" };
+export type BackendDataSource = { id: string; name: string; fileName: string; kind: "upload" | "rest" | "graphql" };
 export type RestKeyValue = { key: string; value: string };
 export type RestSourceInput = {
   name: string;
@@ -39,6 +39,21 @@ export type RestSourceInput = {
   pageSizeParameter: string;
   pageSize: number;
   cursorParameter: string;
+  nextCursorPath: string;
+  maxPages: number;
+  maxBytes: number;
+  timeoutSeconds: number;
+  retryAttempts: number;
+};
+export type GraphqlSourceInput = {
+  name: string;
+  url: string;
+  query: string;
+  variables: string;
+  recordPath: string;
+  headers: RestKeyValue[];
+  cursorEnabled: boolean;
+  cursorVariable: string;
   nextCursorPath: string;
   maxPages: number;
   maxBytes: number;
@@ -96,6 +111,9 @@ export async function listWorkspaceDataSources(): Promise<BackendDataSource[]> {
     if (source.kind === DataSourceKind.REST) {
       return [{ id: source.id, name: source.name, fileName: `REST · ${source.name}.json`, kind: "rest" as const }];
     }
+    if (source.kind === DataSourceKind.GRAPHQL) {
+      return [{ id: source.id, name: source.name, fileName: `GraphQL · ${source.name}.json`, kind: "graphql" as const }];
+    }
     if (source.kind !== DataSourceKind.UPLOAD) return [];
     try {
       const configuration = JSON.parse(source.configurationJson) as { file_name?: string };
@@ -144,12 +162,41 @@ export async function saveWorkspaceRestSource(input: RestSourceInput) {
   return { id: source.id, name: source.name, fileName: `REST · ${source.name}.json`, kind: "rest" as const };
 }
 
+export async function saveWorkspaceGraphqlSource(input: GraphqlSourceInput) {
+  const variables = JSON.parse(input.variables || "{}") as unknown;
+  const pagination = input.cursorEnabled ? {
+    mode: "cursor",
+    variable: input.cursorVariable,
+    next_cursor_path: input.nextCursorPath,
+    initial_cursor: null,
+  } : { mode: "none" };
+  const source = await dataSources.save({ dataSource: {
+    id: "",
+    workspaceId: DEV_WORKSPACE_ID,
+    name: input.name,
+    kind: DataSourceKind.GRAPHQL,
+    configurationJson: JSON.stringify({
+      url: input.url,
+      query: input.query,
+      variables,
+      headers: keyValues(input.headers),
+      record_path: input.recordPath,
+      pagination,
+      max_pages: input.maxPages,
+      max_bytes: input.maxBytes,
+      timeout_seconds: input.timeoutSeconds,
+      retry_attempts: input.retryAttempts,
+    }),
+  } });
+  return { id: source.id, name: source.name, fileName: `GraphQL · ${source.name}.json`, kind: "graphql" as const };
+}
+
 export async function previewWorkspaceSource(id: string) {
   const response = await dataSources.preview({ id });
   if (!response.dataSource) throw new Error("The backend did not return the requested data source.");
   return {
     id: response.dataSource.id,
-    fileName: `REST · ${response.dataSource.name}.json`,
+    fileName: `${response.dataSource.kind === DataSourceKind.GRAPHQL ? "GraphQL" : "REST"} · ${response.dataSource.name}.json`,
     content: response.content,
     recordCount: Number(response.recordCount),
   };
