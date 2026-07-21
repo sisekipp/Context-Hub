@@ -7,6 +7,9 @@
     "build": "pnpm --filter @context-hub/web build",
     "check": "pnpm --filter @context-hub/web check",
     "test": "pnpm --filter @context-hub/web test",
+    "test:e2e": "pnpm --filter @context-hub/web test:e2e",
+    "benchmark:graph": "node scripts/benchmark-graph.mjs",
+    "check:target": "node scripts/check-target-budget.mjs",
     "proto:lint": "buf lint",
     "proto:generate": "buf generate"
   }

@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "check": "tsc --noEmit && eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.10.2",
@@ -25,6 +26,7 @@
   },
   "devDependencies": {
     "@bufbuild/protoc-gen-es": "^2.10.2",
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "^4.1.18",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.1",

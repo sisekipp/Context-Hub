@@ -47,6 +47,25 @@ Open:
 
 Run all checks with `mise run check`.
 
+## Quality and scale checks
+
+The durable Playwright journey uploads JSON, creates the ontology mapping, runs the backend import, and verifies the resulting Explorer. Rebuild the Devcontainer once after pulling these browser dependencies, start the normal local API and web processes, then run:
+
+```bash
+mise run test:e2e
+```
+
+The scale runner creates a dedicated benchmark scope in ClickHouse and replaces only data carrying its fixed benchmark workspace ID. Its defaults are the reference workload of 1,000,000 nodes and 5,000,000 edges. It measures concurrent property-index lookups plus one- and two-hop traversals and writes a JSON report below `benchmark-results/`. The scheduled workflow retains both a single-client baseline and a 16-client load profile:
+
+```bash
+mise run benchmark:graph
+node scripts/benchmark-graph.mjs --nodes=10000 --edges-per-node=5 --iterations=10 --concurrency=4 --assert
+```
+
+`mise run check:target` reports the largest Rust build profiles, warns above 8 GiB, and fails above the configurable 16 GiB hard limit. CI uses an 8 GiB limit. The workspace disables incremental compilation and debug symbols for dev/test builds because Arrow and DataFusion otherwise grow `target` quickly. If the local warning persists, `cargo clean` safely reclaims generated Rust artifacts; the next build recreates them.
+
+GitHub Actions runs Rust, frontend and Protobuf checks, a clean end-to-end import, and a smaller scale smoke test on every change. Pull requests are checked for Protobuf breaking changes against their target branch. The exact million-node/five-million-edge workload runs weekly and on manual dispatch in `.github/workflows/scale.yml`.
+
 ## Repository map
 
 ```text

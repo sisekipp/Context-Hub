@@ -1,0 +1,29 @@
+name: Full-scale benchmark
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  million-node-graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v3
+      - run: docker compose up -d clickhouse
+      - run: docker compose run --rm clickhouse-init
+      - run: node scripts/wait-for-http.mjs http://127.0.0.1:8123/ping
+      - name: Measure single-client baseline
+        run: node scripts/benchmark-graph.mjs --nodes=1000000 --edges-per-node=5 --iterations=30 --concurrency=1 --assert --output=benchmark-results/baseline.json
+      - name: Measure concurrent load
+        run: node scripts/benchmark-graph.mjs --nodes=1000000 --edges-per-node=5 --iterations=100 --concurrency=16 --assert --output=benchmark-results/concurrent.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: million-node-graph-report
+          path: benchmark-results/*.json

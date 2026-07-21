@@ -1,0 +1,5 @@
+[
+  { "service_id": "e2e-api", "service_name": "E2E API" },
+  { "service_id": "e2e-worker", "service_name": "E2E Worker" },
+  { "service_id": "e2e-web", "service_name": "E2E Web" }
+]

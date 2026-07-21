@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: jdx/mise-action@v3
+      - run: buf lint && buf build
+      - name: Check Protobuf compatibility with target branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch origin "$BASE_REF"
+          git branch --force buf-base "origin/$BASE_REF"
+          buf breaking proto --against ".git#branch=buf-base,subdir=proto"
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v3
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: Enforce Rust build-directory budget
+        env:
+          TARGET_BUDGET_GIB: 8
+        run: node scripts/check-target-budget.mjs
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v3
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm proto:generate
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm build
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v3
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm proto:generate
+      - run: docker compose up -d clickhouse minio
+      - run: docker compose run --rm clickhouse-init
+      - run: docker compose run --rm minio-init
+      - run: cargo build -p context-hub-api
+      - name: Start backend and frontend
+        run: |
+          ./target/debug/context-hub-api > api.log 2>&1 &
+          pnpm --filter @context-hub/web dev > web.log 2>&1 &
+      - run: pnpm --filter @context-hub/web exec playwright install --with-deps chromium
+      - name: Wait for services
+        run: node scripts/wait-for-http.mjs http://127.0.0.1:50051 http://127.0.0.1:3000
+      - run: pnpm test:e2e
+      - name: Upload E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics
+          if-no-files-found: ignore
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+            api.log
+            web.log
+
+  scale-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v3
+      - run: docker compose up -d clickhouse
+      - run: docker compose run --rm clickhouse-init
+      - run: node scripts/wait-for-http.mjs http://127.0.0.1:8123/ping
+      - run: node scripts/benchmark-graph.mjs --nodes=10000 --edges-per-node=5 --iterations=10 --concurrency=4 --assert
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scale-smoke-report
+          path: benchmark-results/graph.json

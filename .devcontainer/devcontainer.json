@@ -6,7 +6,7 @@
   "remoteUser": "vscode",
   "shutdownAction": "stopCompose",
   "forwardPorts": [3000, 50051, 8080, 8123, 9001, 9002],
-  "postCreateCommand": "sudo chown -R vscode:vscode /usr/local/cargo/registry && mise trust && mise install && rustup component add rustfmt clippy && corepack enable && CI=true pnpm install && cargo fetch && buf generate",
+  "postCreateCommand": "sudo chown -R vscode:vscode /usr/local/cargo/registry && mise trust && mise install && rustup component add rustfmt clippy && corepack enable && CI=true pnpm install && pnpm --filter @context-hub/web exec playwright install chromium && cargo fetch && buf generate",
   "customizations": {
     "vscode": {
       "extensions": [

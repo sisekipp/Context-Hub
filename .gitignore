@@ -39,6 +39,7 @@ build/
 coverage/
 playwright-report/
 test-results/
+benchmark-results/
 next-env.d.ts
 
 # Rust

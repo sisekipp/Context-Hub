@@ -17,7 +17,7 @@ run = "cargo run -p context-hub-api"
 run = "cargo run -p context-hub-mcp"
 
 [tasks.check]
-depends = ["check:rust", "check:web", "check:proto"]
+depends = ["check:rust", "check:web", "check:proto", "check:target"]
 
 [tasks."check:rust"]
 run = "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
@@ -27,6 +27,15 @@ run = "pnpm --config.confirmModulesPurge=false check && pnpm --config.confirmMod
 
 [tasks."check:proto"]
 run = "buf lint && buf build"
+
+[tasks."check:target"]
+run = "node scripts/check-target-budget.mjs"
+
+[tasks."test:e2e"]
+run = "pnpm --config.confirmModulesPurge=false test:e2e"
+
+[tasks."benchmark:graph"]
+run = "node scripts/benchmark-graph.mjs"
 
 [tasks."db:up"]
 run = "docker compose up -d clickhouse minio"
